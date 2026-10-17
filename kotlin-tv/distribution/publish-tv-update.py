@@ -7,7 +7,7 @@ def run(*args): return subprocess.check_output(args,text=True).strip()
 version=os.environ['HONGGUOTV_VERSION_NAME']; code=int(os.environ['HONGGUOTV_VERSION_CODE']); tag=os.environ['UPDATE_TAG']
 assert re.fullmatch(r'0\.9\.0\+\d+',version) and re.fullmatch(r'kotlin-v0\.9\.0-build\.\d+',tag)
 assert code==10000+int(version.split('+')[1])
-apk=out/f'hongguotv-kotlin-{tag.removeprefix("kotlin-v")}-android8.apk'; shutil.copy2(root/'kotlin-tv/app/build/outputs/apk/release/app-release.apk',apk)
+apk=out/f'hongguotv-{version}-release.apk'; shutil.copy2(root/'kotlin-tv/app/build/outputs/apk/release'/apk.name,apk)
 buildtools=Path(os.environ['ANDROID_HOME'])/'build-tools/36.0.0'
 signature=run(str(buildtools/'apksigner'),'verify','--print-certs',str(apk))
 assert '67e186e5674a9346dcf261457dec514c8bb0df9d99173f8cc8b404a98b0d677c' in signature

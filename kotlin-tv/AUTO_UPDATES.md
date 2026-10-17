@@ -13,8 +13,8 @@
 ## 从推送到发布
 
 1. 向 `wanwdbb/hongguoTV` 的 `main` 分支推送改动。
-2. `.github/workflows/release.yml` 在 ubuntu runner 上执行 JVM 测试、Release lint 和正式签名构建。签名密钥从仓库 Actions Secrets 恢复。
-3. 构建成功后，`kotlin-tv/distribution/publish-tv-update.py` 先创建草稿，上传 APK、源码 ZIP、`update.json` 与 `SHA256SUMS`，确认 GitHub 附件摘要一致，再正式发布并设为 latest。构建失败不替换旧版。
+2. `.github/workflows/release.yml` 在 ubuntu runner 上执行 JVM 测试、Release lint 和正式签名构建。签名密钥从仓库 Actions Secrets 恢复。产物直接命名为 `hongguotv-<版本>-release.apk`（如 `hongguotv-0.9.0+1-release.apk`），同时作为 `hongguotv-apk` 构件上传，可在该次 Actions 运行页面直接下载，不必等发布完成。
+3. 构建成功后，`kotlin-tv/distribution/publish-tv-update.py` 先创建草稿，上传同名 APK、源码 ZIP、`update.json` 与 `SHA256SUMS`，确认 GitHub 附件摘要一致，再正式发布并设为 latest。构建失败不替换旧版。
 4. 电视通过 Release 的 `latest/download/update.json` 获取新版本，无需 GitHub 登录。
 
 如果仓库是从别处 fork 来的，GitHub 默认不会在此类仓库里运行自动触发的工作流。首次需要打开仓库的 Actions 页面，点击「I understand my workflows, go ahead and enable them」，之后 `push` 才会自动构建；手动 `workflow_dispatch` 不受此限制。另外，用个人访问令牌推送新建或修改过的 `.github/workflows/` 文件时，令牌必须有 `workflow` 权限，否则推送会被拒绝。
@@ -36,6 +36,6 @@
 
 云端 `versionCode = 10000 + release workflow run_number`，显示版本为 `0.9.0+run_number`。同一次已发布构建的重跑不覆盖原 APK；旧构建重跑也不能取代更新的 latest。保留此工作流的递增编号，后续调整版本显示名称时仍维持 versionCode 单调递增。
 
-本地未传环境变量时生成 0.9.0 / versionCode 9，供首次验证。复现云端源码时，应从该 Release 的 `update.json` 读取版本，传入 `HONGGUOTV_VERSION_CODE` 和 `HONGGUOTV_VERSION_NAME`；本地低版本号的 APK 无法覆盖较高云端版本。正式分发以云端签名包为准。
+本地未传环境变量时生成 0.9.0 / versionCode 9，供首次验证，产物为 `kotlin-tv/app/build/outputs/apk/release/hongguotv-0.9.0-release.apk`。复现云端源码时，应从该 Release 的 `update.json` 读取版本，传入 `HONGGUOTV_VERSION_CODE` 和 `HONGGUOTV_VERSION_NAME`；本地低版本号的 APK 无法覆盖较高云端版本。正式分发以云端签名包为准。
 
 电视系统没有安装器、禁止未知来源或无法访问 GitHub 时，自动更新不能完成；旧版仍可继续使用。最低 API 26 不等于 Android 8 实体电视已验收。

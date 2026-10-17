@@ -1,8 +1,12 @@
 import java.util.Properties
+import com.android.build.api.variant.impl.VariantOutputImpl
 
 plugins { id("com.android.application"); kotlin("android") }
 val signingProperties = Properties().apply { val config = rootProject.file("keystore.properties"); if (config.exists()) config.inputStream().use { load(it) } }
 fun signingValue(env: String, key: String): String? = System.getenv(env) ?: signingProperties.getProperty(key)
+// Release artifacts ship as hongguotv-<versionName>-release.apk so the build output, the GitHub release asset and the update manifest all agree.
+val deliveryVersionCode = System.getenv("HONGGUOTV_VERSION_CODE")?.toInt() ?: 9
+val deliveryVersionName = System.getenv("HONGGUOTV_VERSION_NAME") ?: "0.9.0"
 
 android {
     namespace = "com.hongguotv.nativeapp"
@@ -11,8 +15,8 @@ android {
         applicationId = "com.hongguotv.nativeapp"
         minSdk = 26
         targetSdk = 36
-        versionCode = System.getenv("HONGGUOTV_VERSION_CODE")?.toInt() ?: 9
-        versionName = System.getenv("HONGGUOTV_VERSION_NAME") ?: "0.9.0"
+        versionCode = deliveryVersionCode
+        versionName = deliveryVersionName
     }
     buildFeatures { buildConfig = true }
     signingConfigs {
@@ -27,6 +31,11 @@ android {
     compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17; isCoreLibraryDesugaringEnabled = true }
     kotlinOptions { jvmTarget = "17" }
     packaging { resources.excludes += setOf("META-INF/versions/**", "META-INF/*.kotlin_module") }
+}
+androidComponents {
+    onVariants(selector().all()) { variant ->
+        if (variant.buildType == "release") variant.outputs.forEach { output -> (output as VariantOutputImpl).outputFileName.set("hongguotv-$deliveryVersionName-release.apk") }
+    }
 }
 dependencies {
     implementation("androidx.core:core:1.8.0")

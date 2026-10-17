@@ -39,6 +39,14 @@ class PhoneSearchServerTest {
             assertFalse(submitted)
         }
     }
+    @Test fun `opaque null origin from a browser is accepted`() {
+        val done=CountDownLatch(1); var query=""
+        PhoneSearchServer("127.0.0.1",{ query=it;done.countDown() }).use { server ->
+            val reply=request(server,"POST",URI(server.url).path+"/submit","query=hello","Origin: null\r\n")
+            assertTrue(reply.startsWith("HTTP/1.1 200"))
+            assertTrue(done.await(2,TimeUnit.SECONDS)); assertEquals("hello",query)
+        }
+    }
     @Test fun `invalid and oversized input does not consume the session`() {
         PhoneSearchServer("127.0.0.1",{}).use { server ->
             for(body in listOf("query=","query="+"x".repeat(81),"query=a&query=b","query=hello%0Aworld","query=%zz")) {

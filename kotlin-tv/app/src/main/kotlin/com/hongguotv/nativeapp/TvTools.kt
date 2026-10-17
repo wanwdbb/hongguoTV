@@ -120,7 +120,7 @@ class TvTools(private val activity: Activity) {
                     val row=LinearLayout(activity).apply { gravity=Gravity.CENTER_VERTICAL }
                     row.addView(qr(session.url),LinearLayout.LayoutParams(dp(185),dp(185)))
                     val instructions=column()
-                    instructions.addView(label("手机扫码后用浏览器打开，输入剧名发送到电视。\n需连接同一局域网；关闭窗口即失效，最长 5 分钟。",16f))
+                    instructions.addView(label("手机扫码或手动输入下方地址，输入剧名发送到电视。\n需连接同一局域网；只在窗口打开期间有效，关闭或开始播放即失效。",16f))
                     instructions.addView(label(session.url,12f))
                     row.addView(instructions,LinearLayout.LayoutParams(0,-2,1f)); content.addView(row)
                 }

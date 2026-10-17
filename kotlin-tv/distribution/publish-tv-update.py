@@ -10,7 +10,7 @@ assert code==10000+int(version.split('+')[1])
 apk=out/f'hongguotv-kotlin-{tag.removeprefix("kotlin-v")}-android8.apk'; shutil.copy2(root/'kotlin-tv/app/build/outputs/apk/release/app-release.apk',apk)
 buildtools=Path(os.environ['ANDROID_HOME'])/'build-tools/36.0.0'
 signature=run(str(buildtools/'apksigner'),'verify','--print-certs',str(apk))
-assert '3579f7a8a91bbbc44688db60fb16a5561921784af23fa92f39b849086d76ca98' in signature
+assert '67e186e5674a9346dcf261457dec514c8bb0df9d99173f8cc8b404a98b0d677c' in signature
 badging=run(str(buildtools/'aapt'),'dump','badging',str(apk))
 assert f"versionCode='{code}'" in badging and f"versionName='{version}'" in badging and "sdkVersion:'26'" in badging
 commit=run('git','rev-parse','HEAD')
@@ -23,7 +23,7 @@ notes=out/'release-notes.md'; notes.write_text(f'''Android 8.0+ 原生独立版�
 
 自动检查、下载新版并校验签名，确认后由系统安装。首次安装本版后，后续更新无需手动传 APK。电视需允许本应用安装未知来源应用；普通 Android 8 仍需确认系统安装。
 
-保留安静连播、完整竖版海报和所有本机记录。使用原发布签名，可直接覆盖此前正式版。
+保留安静连播、完整竖版海报和所有本机记录。使用本仓库专用的发布签名；与旧版签名不同，已有旧签名安装需卸载后重装一次。
 
 自动构建的源码提交：{commit}。测试与 Release lint 通过后才发布。
 

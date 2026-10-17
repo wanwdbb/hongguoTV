@@ -8,3 +8,5 @@ dependencies {
     testImplementation("junit:junit:4.13.2")
 }
 application { mainClass.set("com.hongguotv.core.ProbeKt") }
+// signing.json pins signatures produced with the original fixed device id.
+tasks.test { systemProperty("hongguotv.deviceId", "1905892595378490") }

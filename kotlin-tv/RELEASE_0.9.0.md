@@ -14,7 +14,7 @@
 
 ## 接入状态
 
-公开仓库 `N3urda/hongguoTV-updates` 已创建。自动签名与源代码同步还需要授权配置 Actions Secrets 和专用部署密钥；在 `TV_UPDATES_ENABLED` 未设为 `true` 前，同步工作流跳过。
+发布仓库 `wanwdbb/hongguoTV` 已配置自动构建：在仓库 Actions Secrets 中填入发布密钥（`HONGGUOTV_KEYSTORE_B64` 等）后，向 `main` 推送即触发测试、签名构建与发布。
 
 因此，这份记录不宣称已完成真实公开新版下载、系统安装授权、覆盖更新或云端自动发布的端到端验收。完成凭据配置后，应以实际云端 Release APK 和电视安装结果补充验证。
 

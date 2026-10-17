@@ -4,9 +4,12 @@ package com.hongguotv.core
 internal object VendorConstants {
     const val VIDEO_UA = "com.phoenix.read/71332 (Linux; U; Android 16; zh_CN; 25053RT47C; Build/BP2A.250605.031.A3; Cronet/TTNetVersion:04657795 2026-01-23 QuicVersion:c67e9834 2025-09-08)"
     const val APP_UA = "com.phoenix.read/72232 (Linux; U; Android 16; zh_CN; 25053RT47C; Build/BP2A.250605.031.A3)"
+    // Freshly generated 16-digit identifier, reused for the lifetime of the process.
+    // Overridable via -Dhongguotv.deviceId=... so the pinned signing oracle stays deterministic.
+    private fun randomDeviceId(): String = System.getProperty("hongguotv.deviceId")?.takeIf { it.matches(Regex("[0-9]{1,30}")) } ?: kotlin.random.Random.nextLong(1_000_000_000_000_000L,9_000_000_000_000_000L).toString()
     val device = linkedMapOf(
         "iid" to "1905892595382586",
-        "device_id" to "1905892595378490",
+        "device_id" to randomDeviceId(),
         "ac" to "wifi",
         "channel" to "update_64",
         "aid" to "8662",

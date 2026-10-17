@@ -126,7 +126,7 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
     fun stream(id: String, maxQuality: Int = 1080): StreamInfo {
         require(id.matches(Regex("[0-9]{1,30}")))
         val payload="""{"biz_param":{"detail_page_version":0,"device_level":3,"disable_digg_stat":false,"need_all_video_definition":true,"need_mp4_align":false,"use_os_player":false,"use_server_dns":false,"video_platform":1024},"mixed_video_id_map":{"1004":["$id"]}}""".toByteArray()
-        val signed=signer.sign("https://api5-normal-sinfonlineb.fqnovel.com/novel/player/multi_video_model/v1/",VendorConstants.device,payload)
+        val signed=signer.sign("https://api5-normal-sinfonlineb.fqnovel.com/novel/player/multi_video_model/preload/v1/",VendorConstants.device,payload)
         val data=JSONObject(text(signed.url,signed))
         if(data.optInt("Code",data.optInt("code",0))!=0) throw IOException("播放接口暂不可用")
         val map=data.optJSONObject("data") ?: throw IOException("播放信息为空")

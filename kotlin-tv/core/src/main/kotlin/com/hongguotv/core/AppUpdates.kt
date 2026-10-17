@@ -16,7 +16,7 @@ data class AppUpdate(val versionCode: Long, val versionName: String, val minSdk:
     fun newerThan(installed: Long, sdk: Int) = versionCode > installed && minSdk <= sdk
     val downloadUrl get() = "$RELEASES/download/$tag/$fileName"
     companion object {
-        const val REPOSITORY = "N3urda/hongguoTV-updates"
+        const val REPOSITORY = "wanwdbb/hongguoTV"
         const val RELEASES = "https://github.com/$REPOSITORY/releases"
         const val MAX_APK_BYTES = 80L * 1024 * 1024
         fun parse(json: String): AppUpdate {
@@ -61,7 +61,15 @@ object UpdateFiles {
                 output.fd.sync()
             }
             if (!verify(partial, update)) throw IOException("安装包校验未通过，请重新下载")
-            if (!partial.renameTo(destination)) throw IOException("无法保存安装包")
+            try {
+                java.nio.file.Files.move(partial.toPath(), destination.toPath(),
+                    java.nio.file.StandardCopyOption.REPLACE_EXISTING, java.nio.file.StandardCopyOption.ATOMIC_MOVE)
+            } catch (_: java.nio.file.AtomicMoveNotSupportedException) {
+                // Windows and some filesystems refuse atomic replace; a plain replace is still safe here.
+                java.nio.file.Files.move(partial.toPath(), destination.toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+            } catch (_: Exception) {
+                throw IOException("无法保存安装包")
+            }
         } finally { partial.delete() }
     }
 }

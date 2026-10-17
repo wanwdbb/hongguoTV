@@ -12,8 +12,8 @@ import java.security.MessageDigest
 class AppUpdatesTest {
     private val bytes = "signed-apk-test-bytes".toByteArray()
     private fun json() = JSONObject().put("schema", 1).put("packageName", "com.hongguotv.nativeapp")
-        .put("versionCode", 10001).put("versionName", "0.9.0+1").put("minSdk", 26).put("tag", "kotlin-v0.9.0-build.1")
-        .put("apk", JSONObject().put("name", "hongguotv-0.9.0+1-release.apk").put("size", bytes.size)
+        .put("versionCode", 10001).put("versionName", "0.9.2").put("minSdk", 26).put("tag", "kotlin-v0.9.2")
+        .put("apk", JSONObject().put("name", "hongguotv-0.9.2-release.apk").put("size", bytes.size)
             .put("sha256", MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }))
     private fun update() = AppUpdate.parse(json().toString())
     private fun withFile(block: (File) -> Unit) {
@@ -25,7 +25,7 @@ class AppUpdatesTest {
         assertTrue(update.newerThan(9, 26)); assertFalse(update.newerThan(10001, 36)); assertFalse(update.newerThan(10002, 36)); assertFalse(update.newerThan(9, 25))
     }
     @Test fun downloadUrlUsesOnlyFixedRepositoryAndValidatedNames() {
-        assertEquals("https://github.com/wanwdbb/hongguoTV/releases/download/kotlin-v0.9.0-build.1/hongguotv-0.9.0+1-release.apk", update().downloadUrl)
+        assertEquals("https://github.com/wanwdbb/hongguoTV/releases/download/kotlin-v0.9.2/hongguotv-0.9.2-release.apk", update().downloadUrl)
         for (value in listOf("../../bad.apk", "evil.apk", "https://example.com/evil.apk", "hongguotv-1/2-release.apk", "hongguotv-kotlin-0.9.0-build.1-android8.apk")) {
             val o = json(); o.getJSONObject("apk").put("name", value)
             assertThrows(IllegalArgumentException::class.java) { AppUpdate.parse(o.toString()) }

@@ -13,7 +13,7 @@
 ## 从推送到发布
 
 1. 向 `wanwdbb/hongguoTV` 的 `main` 分支推送改动。
-2. `.github/workflows/release.yml` 在 ubuntu runner 上执行 JVM 测试、Release lint 和正式签名构建。签名密钥从仓库 Actions Secrets 恢复。产物直接命名为 `hongguotv-<版本>-release.apk`（如 `hongguotv-0.9.0+1-release.apk`），同时作为 `hongguotv-apk` 构件上传，可在该次 Actions 运行页面直接下载，不必等发布完成。
+2. `.github/workflows/release.yml` 在 ubuntu runner 上执行 JVM 测试、Release lint 和正式签名构建。签名密钥从仓库 Actions Secrets 恢复。产物直接命名为 `hongguotv-<版本>-release.apk`（如 `hongguotv-0.9.2-release.apk`），同时作为 `hongguotv-apk` 构件上传，可在该次 Actions 运行页面直接下载，不必等发布完成。
 3. 构建成功后，`kotlin-tv/distribution/publish-tv-update.py` 先创建草稿，上传同名 APK、源码 ZIP、`update.json` 与 `SHA256SUMS`，确认 GitHub 附件摘要一致，再正式发布并设为 latest。构建失败不替换旧版。
 4. 电视通过 Release 的 `latest/download/update.json` 获取新版本，无需 GitHub 登录。
 
@@ -34,7 +34,7 @@
 
 ## 版本规则与本地构建
 
-云端 `versionCode = 10000 + release workflow run_number`，显示版本为 `0.9.0+run_number`。同一次已发布构建的重跑不覆盖原 APK；旧构建重跑也不能取代更新的 latest。保留此工作流的递增编号，后续调整版本显示名称时仍维持 versionCode 单调递增。
+云端 `versionCode = 10000 + release workflow run_number`，显示版本为 `0.9.<run_number - 1>`：第 1 次发布 0.9.0、第 2 次 0.9.1、第 3 次 0.9.2，APK 名、tag 与清单版本同源（`hongguotv-0.9.2-release.apk`、`kotlin-v0.9.2`、versionCode 10003）。同一次已发布构建的重跑不覆盖原 APK；旧构建重跑也不能取代更新的 latest。该编号由工作流自身的运行次数决定，因此不要重命名或另建发布工作流文件，否则 run_number 会从 1 重新计数。
 
 本地未传环境变量时生成 0.9.0 / versionCode 9，供首次验证，产物为 `kotlin-tv/app/build/outputs/apk/release/hongguotv-0.9.0-release.apk`。复现云端源码时，应从该 Release 的 `update.json` 读取版本，传入 `HONGGUOTV_VERSION_CODE` 和 `HONGGUOTV_VERSION_NAME`；本地低版本号的 APK 无法覆盖较高云端版本。正式分发以云端签名包为准。
 

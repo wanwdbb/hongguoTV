@@ -17,6 +17,8 @@
 3. 构建成功后，`kotlin-tv/distribution/publish-tv-update.py` 先创建草稿，上传 APK、源码 ZIP、`update.json` 与 `SHA256SUMS`，确认 GitHub 附件摘要一致，再正式发布并设为 latest。构建失败不替换旧版。
 4. 电视通过 Release 的 `latest/download/update.json` 获取新版本，无需 GitHub 登录。
 
+如果仓库是从别处 fork 来的，GitHub 默认不会在此类仓库里运行自动触发的工作流。首次需要打开仓库的 Actions 页面，点击「I understand my workflows, go ahead and enable them」，之后 `push` 才会自动构建；手动 `workflow_dispatch` 不受此限制。另外，用个人访问令牌推送新建或修改过的 `.github/workflows/` 文件时，令牌必须有 `workflow` 权限，否则推送会被拒绝。
+
 ## 签名配置
 
 在 `wanwdbb/hongguoTV` 仓库的 Settings → Secrets and variables → Actions 添加以下 Repository secrets：

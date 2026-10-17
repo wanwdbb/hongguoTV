@@ -32,18 +32,24 @@ jobs:
           printf '%s' "$KEYSTORE_B64" | base64 --decode > "$RUNNER_TEMP/release.jks"
           echo "HONGGUOTV_KEYSTORE=$RUNNER_TEMP/release.jks" >> "$GITHUB_ENV"
           echo "HONGGUOTV_VERSION_CODE=$((10000 + GITHUB_RUN_NUMBER))" >> "$GITHUB_ENV"
-          echo "HONGGUOTV_VERSION_NAME=0.9.0+$GITHUB_RUN_NUMBER" >> "$GITHUB_ENV"
-          echo "UPDATE_TAG=kotlin-v0.9.0-build.$GITHUB_RUN_NUMBER" >> "$GITHUB_ENV"
+          echo "HONGGUOTV_VERSION_NAME=0.9.$((GITHUB_RUN_NUMBER - 1))" >> "$GITHUB_ENV"
+          echo "UPDATE_TAG=kotlin-v0.9.$((GITHUB_RUN_NUMBER - 1))" >> "$GITHUB_ENV"
       - name: Tests, release lint, and signed APK
         env:
           HONGGUOTV_STORE_PASSWORD: ${{ secrets.HONGGUOTV_STORE_PASSWORD }}
           HONGGUOTV_KEY_ALIAS: ${{ secrets.HONGGUOTV_KEY_ALIAS }}
           HONGGUOTV_KEY_PASSWORD: ${{ secrets.HONGGUOTV_KEY_PASSWORD }}
         run: ./kotlin-tv/gradlew -p kotlin-tv :core:test :app:lintRelease :app:assembleRelease --console=plain
+      - name: Upload release APK
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: hongguotv-apk
+          path: kotlin-tv/app/build/outputs/apk/release/hongguotv-*-release.apk
+          if-no-files-found: error
       - name: Publish APK, source, and update manifest
         env:
           GH_TOKEN: ${{ github.token }}
-        run: python3 scripts/publish-tv-update.py
+        run: python3 kotlin-tv/distribution/publish-tv-update.py
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:

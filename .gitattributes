@@ -1,0 +1,7 @@
+# Normalize line endings: POSIX scripts and CI workflow files must stay LF,
+# while the Windows Gradle wrapper keeps CRLF.
+*.sh text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+kotlin-tv/gradlew text eol=lf
+kotlin-tv/gradlew.bat text eol=crlf

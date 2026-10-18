@@ -8,6 +8,7 @@ import java.io.File
 import java.io.ByteArrayOutputStream
 import java.io.IOException
 import java.io.InputStream
+import java.net.URI
 import java.security.MessageDigest
 import java.util.concurrent.TimeUnit
 
@@ -74,22 +75,40 @@ object UpdateFiles {
     }
 }
 
-class AppUpdateRepository : java.io.Closeable {
+/** Direct GitHub is always attempted first; only a timeout or network failure falls back to a mirror prefix. */
+class AppUpdateRepository(private val accelerators: List<String> = DEFAULT_ACCELERATORS) : java.io.Closeable {
+    private val permitted: Set<String> = permittedHosts(accelerators)
     private val http = OkHttpClient.Builder().connectTimeout(10, TimeUnit.SECONDS).readTimeout(20, TimeUnit.SECONDS)
         .callTimeout(5, TimeUnit.MINUTES).addNetworkInterceptor { chain ->
             val url = chain.request().url
-            // Follow GitHub's CDN redirects, never cleartext or arbitrary manifest-provided hosts.
-            if (url.scheme != "https" || url.host !in setOf("github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com"))
+            // Follow GitHub's CDN and mirror redirects, never cleartext or arbitrary manifest-provided hosts.
+            if (url.scheme != "https" || url.host !in permitted)
                 throw IOException("更新下载地址不受支持")
             chain.proceed(chain.request())
         }.build()
     private fun request(url: String) = Request.Builder().url(url).header("User-Agent", "HongguoTV-Updater")
         .header("Cache-Control", "no-cache").build()
+    private fun cancelled() = Thread.currentThread().isInterrupted
     fun latest(): AppUpdate {
-        val call = http.newCall(request("${AppUpdate.RELEASES}/latest/download/update.json"))
-        call.timeout().timeout(25, TimeUnit.SECONDS)
+        var failure: IOException? = null
+        for ((attempt, url) in accelerated("${AppUpdate.RELEASES}/latest/download/update.json", accelerators).withIndex()) {
+            if (cancelled()) throw IOException("更新检查已取消")
+            try {
+                return manifest(url)
+            } catch (e: MissingRelease) {
+                // Only GitHub itself may declare that no release exists; a mirror missing the file is just a failed attempt.
+                if (attempt == 0) throw e
+                failure = e
+            } catch (e: IOException) { failure = e }
+        }
+        throw failure ?: IOException("无法检查更新，请稍后重试")
+    }
+    private fun manifest(url: String): AppUpdate {
+        val call = http.newCall(request(url))
+        call.timeout().timeout(20, TimeUnit.SECONDS)
         return call.execute().use { response ->
-            if (!response.isSuccessful) throw IOException(if (response.code == 404) "尚无可用的自动更新版本" else "无法检查更新，请稍后重试")
+            if (response.code == 404) throw MissingRelease()
+            if (!response.isSuccessful) throw IOException("无法检查更新，请稍后重试")
             val bytes = response.body?.byteStream()?.use { input ->
                 val out = ByteArrayOutputStream(); val buffer = ByteArray(4096)
                 while (true) { val n = input.read(buffer); if (n < 0) break; if (out.size() + n > 65536) throw IOException("更新信息过大"); out.write(buffer, 0, n) }
@@ -100,7 +119,21 @@ class AppUpdateRepository : java.io.Closeable {
     }
     fun download(update: AppUpdate, file: File, progress: (Int) -> Unit) {
         if (UpdateFiles.verify(file, update)) return
-        http.newCall(request(update.downloadUrl)).execute().use { response ->
+        var failure: IOException? = null
+        for (url in accelerated(update.downloadUrl, accelerators)) {
+            if (cancelled()) throw IOException("下载已取消")
+            try { return fetch(url, update, file, progress) }
+            catch (e: IOException) {
+                // A cancelled download must not silently restart on the next mirror.
+                if (cancelled()) throw e
+                failure = e
+                progress(0)
+            }
+        }
+        throw failure ?: IOException("安装包下载失败，请稍后重试")
+    }
+    private fun fetch(url: String, update: AppUpdate, file: File, progress: (Int) -> Unit) {
+        http.newCall(request(url)).execute().use { response ->
             if (!response.isSuccessful) throw IOException("安装包下载失败，请稍后重试")
             val body = response.body ?: throw IOException("安装包为空")
             if (body.contentLength() >= 0 && body.contentLength() != update.size) throw IOException("安装包长度异常")
@@ -109,4 +142,22 @@ class AppUpdateRepository : java.io.Closeable {
     }
     fun cancel() = http.dispatcher.cancelAll()
     override fun close() { cancel(); http.connectionPool.evictAll(); http.dispatcher.executorService.shutdown() }
+
+    private class MissingRelease : IOException("尚无可用的自动更新版本")
+
+    companion object {
+        /**
+         * Plain URL prefixes tried in order after a direct GitHub attempt. A mirror can only ever deliver bytes that
+         * the SHA-256 check in [UpdateFiles] accepts, and the installer still verifies the release signature.
+         */
+        val DEFAULT_ACCELERATORS = listOf("https://gh-proxy.com/", "https://ghfast.top/", "https://ghproxy.vip/")
+        private val GITHUB_HOSTS = setOf("github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com")
+        private fun hostOf(prefix: String) = runCatching { URI(prefix) }.getOrNull()
+            ?.takeIf { it.scheme == "https" && !it.host.isNullOrBlank() }?.host
+        /** Direct URLs first, then one URL per usable accelerator prefix; cleartext or malformed entries are dropped. */
+        fun accelerated(url: String, accelerators: List<String> = DEFAULT_ACCELERATORS): List<String> =
+            listOf(url) + accelerators.mapNotNull { prefix -> hostOf(prefix)?.let { prefix.trimEnd('/') + "/" + url } }
+        fun permittedHosts(accelerators: List<String> = DEFAULT_ACCELERATORS): Set<String> =
+            GITHUB_HOSTS + accelerators.mapNotNull(::hostOf)
+    }
 }

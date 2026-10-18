@@ -1,5 +1,6 @@
 package com.hongguotv.core
 
+import okhttp3.Request
 import org.json.JSONObject
 import org.junit.Assert.*
 import org.junit.Test
@@ -73,5 +74,26 @@ class AppUpdatesTest {
     @Test fun cacheMustStillMatchExpectedContent() = withFile { file ->
         file.writeBytes(bytes); assertTrue(UpdateFiles.verify(file, update()))
         file.writeBytes(ByteArray(bytes.size)); assertFalse(UpdateFiles.verify(file, update()))
+    }
+    @Test fun mirrorsAreTriedAfterDirectGithubAndKeepValidHttpsUrls() {
+        val url = update().downloadUrl
+        val candidates = AppUpdateRepository.accelerated(url, listOf("https://gh-proxy.com/", "https://ghfast.top", "http://cleartext.example/", "not a url"))
+        assertEquals(url, candidates.first())
+        assertEquals(listOf("https://gh-proxy.com/$url", "https://ghfast.top/$url"), candidates.drop(1))
+        // OkHttp must keep the embedded target URL intact when the request is built.
+        for (candidate in candidates) assertEquals(candidate, Request.Builder().url(candidate).build().url.toString())
+        assertEquals("https://gh-proxy.com/${AppUpdate.RELEASES}/latest/download/update.json",
+            AppUpdateRepository.accelerated("${AppUpdate.RELEASES}/latest/download/update.json", listOf("https://gh-proxy.com/"))[1])
+    }
+    @Test fun onlyGithubAndConfiguredMirrorHostsAreReachable() {
+        val hosts = AppUpdateRepository.permittedHosts(listOf("https://gh-proxy.com/", "http://cleartext.example/", "not a url"))
+        assertEquals(setOf("github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com", "gh-proxy.com"), hosts)
+    }
+    @Test fun defaultAcceleratorsArePlainHttpsPrefixes() {
+        assertTrue(AppUpdateRepository.DEFAULT_ACCELERATORS.isNotEmpty())
+        for (prefix in AppUpdateRepository.DEFAULT_ACCELERATORS) {
+            val uri = java.net.URI(prefix)
+            assertEquals("https", uri.scheme); assertEquals("https://${uri.host}/", prefix)
+        }
     }
 }

@@ -114,6 +114,7 @@ class Library(context: Context) {
     fun progress(id: String): WatchProgress? = state().progress(id)
     fun searches() = state().searches()
     fun watched(id: String) = state().watched(id)
+    fun watchedIds() = state().watched()
     fun hidden() = state().hidden()
     fun favoriteUpdate(id: String) = state().favoriteUpdate(id)
     fun updatedFavorites() = state().updatedFavorites()

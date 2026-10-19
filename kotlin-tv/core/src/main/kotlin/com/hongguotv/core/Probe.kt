@@ -50,6 +50,36 @@ fun main(args: Array<String>) {
         }
         return
     }
+    if(args.contains("--recommend")) {
+        try {
+            fun pool(page: Int,mode: RecommendMode): List<RecommendCandidate> {
+                val types=mode.type?.let { listOf(it) } ?: listOf(CatalogType.REAL,CatalogType.COMIC_DRAMA,CatalogType.AI_DRAMA)
+                return types.flatMap { type ->
+                    runCatching { repository.category(type,page=page).items }.onFailure { println("  source=${type.label} failed=${it.message}") }.getOrDefault(emptyList())
+                        .map { RecommendCandidate(it,type) }
+                }
+            }
+            val profile=RecommendProfile(interests=mapOf("逆袭" to 6),recent=emptyMap(),completed=emptySet())
+            val session=RecommendSession("probe-seed",RecommendMode.MIXED,profile)
+            val first=session.append(pool(1,RecommendMode.MIXED))
+            val second=session.append(pool(2,RecommendMode.MIXED))
+            check(first.size==24 && second.size==24) { "批量不足：${first.size}/${second.size}" }
+            val counts=first.groupingBy { it.type }.eachCount()
+            check(counts.getValue(CatalogType.REAL)==12 && counts.getValue(CatalogType.COMIC_DRAMA)==7 && counts.getValue(CatalogType.AI_DRAMA)==5) { "混合比例变化：$counts" }
+            check(first.map { it.series.id }.toSet().intersect(second.map { it.series.id }.toSet()).isEmpty()) { "分页出现重复" }
+            check((first+second).all { it.series.id.matches(Regex("[0-9]{1,30}")) && it.series.title.isNotBlank() })
+            println("mixed=${counts.getValue(CatalogType.REAL)}/${counts.getValue(CatalogType.COMIC_DRAMA)}/${counts.getValue(CatalogType.AI_DRAMA)} (real/comic/ai); batch1=${first.size}; batch2=${second.size}; overlap=0; first=${first.first().series.title}; second=${second.first().series.title}")
+            val single=RecommendSession("probe-seed",RecommendMode.AI).append(pool(1,RecommendMode.AI))
+            check(single.isNotEmpty() && single.all { it.type==CatalogType.AI_DRAMA }) { "单一类型模式混入了其它类型" }
+            println("single=ai; items=${single.size}")
+            val seeded=RecommendSession("probe-seed-2",RecommendMode.MIXED,profile).append(pool(1,RecommendMode.MIXED))
+            check(seeded.size==first.size && seeded.map { it.series.id }!=first.map { it.series.id }) { "换种子没有换序" }
+            println("newSeed=reshuffled; first=${seeded.first().series.title}")
+        } finally {
+            repository.http.connectionPool.evictAll(); repository.http.dispatcher.executorService.shutdown()
+        }
+        return
+    }
     val type=if(args.contains("--comic")) ContentType.COMIC else ContentType.SHORT
     val keyword=if(type==ContentType.COMIC) "修仙" else "总裁"
     val search=repository.search(keyword,type=type); println("search=${search.items.size}; hasMore=${search.hasMore}")

@@ -15,6 +15,13 @@ enum class RankBoard(val slug: String, val label: String, val rankKey: String) {
 
     val path get() = "/rank/$slug"
     val pageKey get() = "rank_$slug/page"
+    /** 榜单对应的内容类型；综合榜是混合榜单，没有单一类型。 */
+    val type: CatalogType? get() = when(this) {
+        HONGGUO -> null
+        REAL -> CatalogType.REAL
+        AI -> CatalogType.AI_DRAMA
+        COMIC -> CatalogType.COMIC_DRAMA
+    }
 
     companion object { fun fromStored(value: String?): RankBoard = entries.firstOrNull { it.slug==value } ?: HONGGUO }
 }

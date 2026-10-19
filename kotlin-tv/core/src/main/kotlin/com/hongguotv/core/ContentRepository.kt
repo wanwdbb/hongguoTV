@@ -20,7 +20,7 @@ data class Series(val id: String, val title: String, val cover: String = "", val
 data class Detail(val series: Series, val episodes: List<String>)
 data class RankPosition(val rank: Int?, val heat: String)
 data class ComicRanking(val positions: Map<String,RankPosition>, val totalPages: Int, val updatedText: String)
-data class CatalogPage(val items: List<Series>, val hasMore: Boolean, val ranking: ComicRanking? = null)
+data class CatalogPage(val items: List<Series>, val hasMore: Boolean, val ranking: ComicRanking? = null, val genres: List<CatalogGenre> = emptyList())
 data class StreamInfo(val url: String, val key: ByteArray?, val quality: String)
 class SearchSessionExpiredException: IOException("搜索结果已过期，请从第 1 页重新搜索")
 
@@ -58,12 +58,32 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
     fun home(page: Int = 1, type: ContentType = ContentType.SHORT): CatalogPage {
         require(page in 1..100)
         if(type==ContentType.COMIC) return comicRanking(page)
-        val data=router("$site/category?tab=1&sort_type=1"+if(page>1) "&page=$page" else "")
-        val section=data.optJSONObject("category_page") ?: data.optJSONObject("category_$") ?: throw IOException("首页数据结构已变化")
-        val rows=section.optJSONArray("recommendList") ?: section.optJSONObject("categoryData")?.optJSONArray("recommendList") ?: throw IOException("首页数据暂不可用")
-        val items=valid(rows.objects().map(::card))
-        val lastPage=section.optJSONObject("pagination")?.optInt("totalPages",100) ?: 100
-        return CatalogPage(items,items.isNotEmpty() && page<minOf(lastPage,100))
+        val section=categorySection(router("$site/category?tab=1&sort_type=1"+if(page>1) "&page=$page" else ""))
+        val items=valid(categoryRows(section).objects().map(::card))
+        return CatalogPage(items,items.isNotEmpty() && page<lastPage(section),null,categoryGenres(section))
+    }
+    /** 分类浏览：`全部` 用空题材，其余按网站的分类页地址抓取。 */
+    fun category(type: CatalogType, genre: String = "", page: Int = 1): CatalogPage {
+        require(page in 1..100)
+        require(genre.isEmpty() || genre.matches(Regex("[a-z0-9-]{1,40}"))) { "分类题材格式错误" }
+        val path=type.path+(if(genre.isEmpty()) "" else "/$genre")+(if(page>1) "?page=$page" else "")
+        val section=categorySection(router("$site$path"))
+        val items=valid(categoryRows(section).objects().map(::card))
+        return CatalogPage(items,items.isNotEmpty() && page<lastPage(section),null,categoryGenres(section))
+    }
+    private fun categorySection(data: JSONObject): JSONObject =
+        data.optJSONObject("category_page") ?: data.optJSONObject("category_$") ?: throw IOException("内容数据结构已变化")
+    private fun categoryRows(section: JSONObject): JSONArray =
+        section.optJSONArray("recommendList") ?: section.optJSONObject("categoryData")?.optJSONArray("recommendList")
+        ?: throw IOException("内容数据暂不可用")
+    private fun lastPage(section: JSONObject) = minOf(section.optJSONObject("pagination")?.optInt("totalPages",100) ?: 100,100)
+    /** 分类页的题材筛选项（网站第一行筛选器），不额外补「全部」。 */
+    private fun categoryGenres(section: JSONObject): List<CatalogGenre> {
+        val row=(section.optJSONArray("selectorList") ?: return emptyList()).objects().firstOrNull() ?: return emptyList()
+        return (row.optJSONArray("items") ?: return emptyList()).objects().mapNotNull { item ->
+            val slug=item.str("selector_item_id"); val label=item.str("show_name")
+            if(slug.isNotEmpty() && label.isNotEmpty()) CatalogGenre(slug,label) else null
+        }
     }
     fun search(keyword: String, page: Int = 1, type: ContentType = ContentType.SHORT): CatalogPage {
         require(keyword.isNotBlank() && keyword.length<=80 && page in 1..100)

@@ -24,6 +24,28 @@ fun main(args: Array<String>) {
         }
         return
     }
+    if(args.contains("--category")) {
+        try {
+            for(type in CatalogType.entries) {
+                val all=repository.category(type)
+                check(all.items.isNotEmpty())
+                println("type=${type.label}(${type.storedValue}); items=${all.items.size}; genres=${all.genres.size}; hasMore=${all.hasMore}; first=${all.items.first().title}")
+                if(all.genres.isEmpty()) { println("  genres=none (网站没有题材筛选)"); continue }
+                println("  genres=${all.genres.joinToString(" ") { it.label }}")
+                val genre=all.genres.first()
+                val filtered=repository.category(type,genre.slug)
+                check(filtered.items.isNotEmpty())
+                check(filtered.items.map { it.id }!=all.items.map { it.id }) { "题材没有过滤出不同片单" }
+                check(filtered.genres.map { it.slug }==all.genres.map { it.slug })
+                val second=if(filtered.hasMore) repository.category(type,genre.slug,2) else null
+                if(second!=null) check(second.items.none { it.id in filtered.items.map { item -> item.id }.toSet() })
+                println("  genre=${genre.label}; items=${filtered.items.size}; hasMore=${filtered.hasMore}; page2=${second?.items?.size ?: 0}; first=${filtered.items.first().title}")
+            }
+        } finally {
+            repository.http.connectionPool.evictAll(); repository.http.dispatcher.executorService.shutdown()
+        }
+        return
+    }
     val type=if(args.contains("--comic")) ContentType.COMIC else ContentType.SHORT
     val keyword=if(type==ContentType.COMIC) "修仙" else "总裁"
     val search=repository.search(keyword,type=type); println("search=${search.items.size}; hasMore=${search.hasMore}")

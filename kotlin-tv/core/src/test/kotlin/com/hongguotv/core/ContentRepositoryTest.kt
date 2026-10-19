@@ -202,6 +202,49 @@ class ContentRepositoryTest {
         assertFalse(result.hasMore)
     }
 
+    @Test fun categoryRequestsGenrePathAndParsesFiltersAndPagination() {
+        val repo=repository { request ->
+            assertEquals("/category/real-drama/romance",request.url.encodedPath)
+            assertEquals("2",request.url.queryParameter("page"))
+            """<script>_ROUTER_DATA={"loaderData":{"category_$":{"recommendList":[{"series_id":"456","series_name":"测试短剧","tags":[{"name":"爱情"}]}],
+                "pagination":{"totalPages":3},"selectorList":[{"row_id":1,"row_name":"全部分类","items":[
+                {"selector_item_id":"romance","show_name":"爱情","category_json_ids":["5000"]},
+                {"selector_item_id":"period","show_name":"年代","category_json_ids":["5021"]}]}]}}};</script>"""
+        }
+        val result=repo.category(CatalogType.REAL,"romance",2)
+        assertEquals("456",result.items.single().id)
+        assertEquals("爱情",result.items.single().tags)
+        assertEquals(listOf(CatalogGenre("romance","爱情"),CatalogGenre("period","年代")),result.genres)
+        assertTrue(result.hasMore)
+    }
+
+    @Test fun categoryWithoutGenreUsesTypeRootAndStopsOnLastPage() {
+        val repo=repository { request ->
+            assertEquals("/category/comic",request.url.encodedPath)
+            assertNull(request.url.queryParameter("page"))
+            """<script>_ROUTER_DATA={"loaderData":{"category_page":{"recommendList":[{"series_id":"1","series_name":"漫画"}],"pagination":{"totalPages":1}}}};</script>"""
+        }
+        val result=repo.category(CatalogType.COMIC)
+        assertEquals("漫画",result.items.single().title)
+        assertTrue(result.genres.isEmpty())
+        assertFalse(result.hasMore)
+    }
+
+    @Test fun categoryRejectsUnsafeGenreAndPage() {
+        val repo=repository { """<script>_ROUTER_DATA={"loaderData":{"category_$":{"recommendList":[]}}};</script>""" }
+        assertThrows(IllegalArgumentException::class.java) { repo.category(CatalogType.REAL,"../escape") }
+        assertThrows(IllegalArgumentException::class.java) { repo.category(CatalogType.AI_DRAMA,"",101) }
+    }
+
+    @Test fun categoryTypeRemembersKnownValuesAndFallsBackForUnknown() {
+        assertEquals(CatalogType.AI_DRAMA,CatalogType.fromStored("ai-drama"))
+        assertEquals(CatalogType.COMIC_DRAMA,CatalogType.fromStored("comic-drama"))
+        assertEquals(CatalogType.REAL,CatalogType.fromStored("no-such-type"))
+        assertEquals(CatalogType.REAL,CatalogType.fromStored(null))
+        assertEquals(listOf("真人剧","漫剧","AI剧","漫画"),CatalogType.entries.map { it.label })
+        assertEquals(listOf("/category/real-drama","/category/comic-drama","/category/ai-drama","/category/comic"),CatalogType.entries.map { it.path })
+    }
+
     private fun searchTab(type: Int,id: String) = JSONObject().put("tab_type",type).put("has_more",true)
         .put("data",JSONArray().put(JSONObject().put("video_data",JSONArray().put(JSONObject()
             .put("series_id",id).put("title","测试剧集").put("episode_cnt",8)))))

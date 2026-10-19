@@ -30,10 +30,10 @@ class MainActivity: Activity() {
     private companion object {
         const val TAB_HOME=0
         const val TAB_SEARCH=1
-        const val TAB_RANK=2
-        const val TAB_FAVORITES=3
-        const val TAB_HISTORY=4
-        const val TAB_CATEGORY=5
+        const val TAB_CATEGORY=2
+        const val TAB_RANK=3
+        const val TAB_FAVORITES=4
+        const val TAB_HISTORY=5
         const val TAB_SETTINGS=6
         /** 分类片单复用时长：这段时间内重复进入同一分类直接显示缓存。 */
         const val CATEGORY_CACHE_MS=10*60*1000L
@@ -419,7 +419,7 @@ class MainActivity: Activity() {
         brand.addView(ImageView(this).apply { setImageResource(com.hongguotv.nativeapp.R.drawable.app_icon) },lp(dp(28),dp(28)).apply { rightMargin=dp(9) })
         brand.addView(text("红果",22f).apply { typeface=Typeface.create("sans-serif-medium",Typeface.NORMAL) })
         top.addView(brand,lp(dp(120),dp(44)))
-        listOf("首页","搜索","排行榜","收藏","最近观看","分类","设置").forEachIndexed { index,label ->
+        listOf("首页","搜索","分类","排行榜","收藏","最近观看","设置").forEachIndexed { index,label ->
             val item=addButton(top,label,index==tab) { switchTab(index) }
             fun paint(focused: Boolean) {
                 item.setTextColor(if(focused) bg else if(index==tab) accent else muted)

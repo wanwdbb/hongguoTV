@@ -75,6 +75,13 @@ class MainActivity: Activity() {
     private var feedIndex=0
     private var pendingFeedIndex: Int?=null
     private var feedBatchJob: java.util.concurrent.Future<*>?=null
+    /** 推荐连播当前这一部的剧集 id：离开推荐再回来接着看这一部。 */
+    private var feedSeriesId=""
+    /** 正在后台换一批时非空，避免连按「换一批」重复请求。 */
+    private var feedRefreshJob: java.util.concurrent.Future<*>?=null
+    private lateinit var feedTop: LinearLayout
+    private var feedTopReady=false
+    private var feedBackAt=0L
     private var playbackHint: TextView?=null
     private var collection: String?=null
     private var collectionReturn: CatalogState?=null
@@ -333,6 +340,8 @@ class MainActivity: Activity() {
     }
     private fun switchTab(next: Int) {
         leaveCollection()
+        // 从推荐连播切到别的页：先把这一部的位置存下来并放掉播放器。
+        if(next!=TAB_RECOMMEND && screen=="player" && feedMode) { saveProgress(); library.flush(); releasePlayer() }
         tabState[tab]=CatalogState(page,catalog,hasMore,ranking); tabFocus[tab]=catalogFocus
         tab=next; val saved=tabState[next]; page=saved?.page ?: 1; catalog=saved?.items ?: emptyList(); hasMore=saved?.hasMore ?: false; ranking=saved?.ranking; catalogFocus=tabFocus[next].orEmpty()
         val remote=next==TAB_HOME || next==TAB_RANK || next==TAB_CATEGORY || next==TAB_RECOMMEND || (next==TAB_SEARCH && query.isNotBlank())
@@ -563,16 +572,8 @@ class MainActivity: Activity() {
         "resume" -> library.history().filterNot { library.watched(it.series.id) }.map { it.series }
         else -> if(tab==TAB_FAVORITES) library.favorites() else library.history().map { it.series }
     }
-    private fun showCatalog(load: Boolean=false,focusNav: Boolean=false,focusType: Boolean=false) {
-        initialCatalogPending=false; restoreStoppedPage=false; pendingDetail=null
-        feedMode=false; pendingFeedIndex=null
-        // Never cache a new page number with the previous page's results while a request is pending.
-        if(load) {
-            val cached=if(tab==TAB_HOME && page==1) library.cachedHome(library.contentType) else null
-            catalog=cached?.items ?: emptyList(); hasMore=cached?.hasMore ?: false; ranking=null; homeFromCache=cached!=null
-        }
-        invalidatePage(); screen="catalog"; releaseCatalogViews(); val container=base()
-        if(foreground && library.isLoaded && !favoriteMonitor.running) main.post { if(foreground && screen=="catalog") favoriteMonitor.check() }
+    /** 顶部导航：片单页与推荐连播页共用同一排入口，切页靠 switchTab。 */
+    private fun buildNav(container: LinearLayout,divider: Boolean=true): LinearLayout {
         val top=row().apply { setPadding(0,0,0,dp(8)) }
         val brand=row()
         brand.addView(ImageView(this).apply { setImageResource(com.hongguotv.nativeapp.R.drawable.app_icon) },lp(dp(28),dp(28)).apply { rightMargin=dp(9) })
@@ -588,20 +589,25 @@ class MainActivity: Activity() {
             paint(false); item.setOnFocusChangeListener { _,focused -> paint(focused) }; nav+=item
         }
         container.addView(top)
-        container.addView(View(this).apply { setBackgroundColor(TvStyle.outline) },lp(-1,dp(1)).apply { bottomMargin=dp(6) })
+        if(divider) container.addView(View(this).apply { setBackgroundColor(TvStyle.outline) },lp(-1,dp(1)).apply { bottomMargin=dp(6) })
+        return top
+    }
+    private fun showCatalog(load: Boolean=false,focusNav: Boolean=false,focusType: Boolean=false) {
+        initialCatalogPending=false; restoreStoppedPage=false; pendingDetail=null
+        // 推荐页现在就是连播页：不再显示卡片，进入推荐立刻自动播放。
+        if(tab==TAB_RECOMMEND && collection==null) { enterFeed(); return }
+        feedMode=false; pendingFeedIndex=null
+        // Never cache a new page number with the previous page's results while a request is pending.
+        if(load) {
+            val cached=if(tab==TAB_HOME && page==1) library.cachedHome(library.contentType) else null
+            catalog=cached?.items ?: emptyList(); hasMore=cached?.hasMore ?: false; ranking=null; homeFromCache=cached!=null
+        }
+        invalidatePage(); screen="catalog"; releaseCatalogViews(); val container=base()
+        if(foreground && library.isLoaded && !favoriteMonitor.running) main.post { if(foreground && screen=="catalog") favoriteMonitor.check() }
+        val top=buildNav(container)
         if(tab==TAB_SETTINGS) {
             val scroll=ScrollView(this); val body=column(); scroll.addView(body); container.addView(scroll,lp(-1,0).apply { weight=1f })
             settings(body); if(focusNav) nav[tab].requestFocus(); return
-        }
-        if(tab==TAB_RECOMMEND) {
-            val heading=row().apply { setPadding(0,dp(8),0,dp(6)) }
-            heading.addView(text("为你推荐",25f).apply { setTypeface(null,Typeface.BOLD) },lp(0,-2).apply { weight=1f })
-            val refresh=addButton(heading,"换一批") { catalog=emptyList(); hasMore=false; page=1; catalogFocus=""; showCatalog(true) }.apply { nextFocusUpId=nav[tab].id }
-            recommendRefresh=refresh
-            container.addView(heading)
-            recommendSubtitle=text(recommendSubtitleText(),13f,muted).apply { setPadding(0,0,0,dp(8)) }
-            container.addView(recommendSubtitle)
-            nav.forEach { it.nextFocusDownId=refresh.id }
         }
         if((tab==TAB_HOME || tab==TAB_SEARCH)) {
             val types=row().apply { setPadding(0,dp(8),0,dp(6)) }
@@ -864,7 +870,7 @@ class MainActivity: Activity() {
                 val progress=if(tab==TAB_HISTORY || collection=="resume") library.progress(item.id) else null
                 val badge=text(if(tab==TAB_FAVORITES) library.favoriteLabel(item.id) else if(tab==TAB_RANK) rankBadge else if(progress!=null) if(library.watched(item.id)) "整剧已看完" else "第 ${progress.episodeIndex+1} 集 · ${formatTime(progress.position)}" else item.badge,12f,if(tab==TAB_RANK || tab==TAB_FAVORITES) accent else muted).apply { maxLines=1; minLines=1; minHeight=dp(19); ellipsize=TextUtils.TruncateAt.END; setPadding(dp(3),0,0,0) }
                 card.addView(badge,lp(-1,-2)); if(tab==TAB_FAVORITES) favoriteBadges[item.id]=badge
-                card.setOnClickListener { catalogFocus=item.id; if(tab==TAB_RECOMMEND && collection==null) startFeed(item) else openDetail(item,tab==TAB_HISTORY || collection=="resume" || collection=="updates") }
+                card.setOnClickListener { catalogFocus=item.id; openDetail(item,tab==TAB_HISTORY || collection=="resume" || collection=="updates") }
                 card.setOnLongClickListener { catalogFocus=item.id; quickActions(item,card); true }
                 card.setOnKeyListener { _,key,event -> if(key==KeyEvent.KEYCODE_MENU) { if(event.action==KeyEvent.ACTION_UP) { catalogFocus=item.id; quickActions(item,card) }; true } else false }
                 card.setOnFocusChangeListener { _,focused -> card.background=TvStyle.card(this,focused); if(focused) { catalogFocus=item.id; loadCover(image,item.cover); preview.show(item,when { tab==TAB_RANK -> listOfNotNull(position?.rank?.let { "第 $it 名" },rankBadge).filter { it.isNotBlank() }.joinToString(" · "); recommendType!=null -> listOf(recommendType.label,selectionStatus(item)).filter { it.isNotBlank() }.joinToString(" · "); else -> selectionStatus(item) }); if(!restoringScroll) scroll.post { scroll.smoothScrollTo(0,when { line.top<scroll.scrollY -> line.top; line.bottom>scroll.scrollY+scroll.height -> (line.bottom-scroll.height).coerceAtLeast(0); else -> scroll.scrollY }) } } }
@@ -1017,7 +1023,7 @@ class MainActivity: Activity() {
         if(tab==TAB_HISTORY) labels+="管理观看记录"
         tvTools.choose(series.title,labels,anchor,{ choice ->
             when(choice) {
-                0 -> if(tab==TAB_RECOMMEND && collection==null) startFeed(series) else openDetail(series,true)
+                0 -> openDetail(series,true)
                 1 -> { val added=library.toggle(series); Toast.makeText(this,if(added) "已收藏" else "已取消收藏",Toast.LENGTH_SHORT).show(); refreshLibraryCards(series.id,!added && (tab==TAB_FAVORITES || collection=="updates")); if(added) favoriteMonitor.check() }
                 2 -> { val added=library.toggleLater(series); Toast.makeText(this,if(added) "已加入稍后看" else "已移出稍后看",Toast.LENGTH_SHORT).show(); refreshLibraryCards(series.id,!added && collection=="later") }
                 3 -> openDetail(series)
@@ -1153,19 +1159,51 @@ class MainActivity: Activity() {
         }, { problem -> error(body,problem) { openDetail(series,resume,detailAutoplay) } })
     }
     /**
-     * 推荐连播：推荐页按确认直接播放，播放中 ↑/↓ 换上一部/下一部。
+     * 推荐页就是播放页：进入推荐立刻自动播放（没有卡片），播放中 ↑/↓ 换上一部/下一部。
      * 连播按推荐片单顺序走，切走的那一部会先存下播放位置。
      */
-    private fun startFeed(series: Series) {
-        val index=catalog.indexOfFirst { it.id==series.id }
-        if(index<0) return
-        feedMode=true; feedIndex=index; pendingFeedIndex=null; directPlayback=true
-        catalogFocus=series.id
-        playFeedSeries(series)
+    private fun enterFeed() {
+        feedMode=true; directPlayback=true; requestedAutoplay=true
+        val index=catalog.indexOfFirst { it.id==feedSeriesId }
+        if(index>=0) { feedIndex=index; catalogFocus=catalog[index].id; playFeedSeries(catalog[index]); return }
+        loadFeedSession()
+    }
+    /** 换一批：重新开一次推荐会话，取到第一批就从第一部开始播。 */
+    private fun loadFeedSession() {
+        feedMode=true; directPlayback=true
+        if(screen=="player") { saveProgress(); library.flush(); releasePlayer() }
+        catalog=emptyList(); hasMore=false; page=1; catalogFocus=""; feedSeriesId=""; pendingFeedIndex=null
+        showFeedLoading("正在为你挑选内容…")
+        newRecommendSession()
+        val mode=recommendMode; val tags=recommendTags; val startPage=recommendStartPage()
+        val hidden=if(library.isLoaded) library.hidden() else emptySet()
+        work({ recommendPool(1,mode,tags,startPage,hidden) }, { candidates ->
+            if(!feedMode) return@work
+            mergeRecommendBatch(1,candidates)
+            val first=catalog.firstOrNull()
+            if(first==null) { showFeedError(java.io.IOException("推荐来源暂时没有内容")); return@work }
+            feedIndex=0; catalogFocus=first.id; feedSeriesId=first.id; playFeedSeries(first)
+        }, { problem -> if(feedMode) showFeedError(problem) })
+    }
+    /** 推荐还没取到片单时的过渡页：不显示任何卡片，取到就直接开播。 */
+    private fun showFeedLoading(label: String) {
+        invalidatePage(); releaseCatalogViews(); screen="catalog"; feedMode=true
+        val container=base(); buildNav(container)
+        val body=column(); container.addView(body,lp(-1,0).apply { weight=1f })
+        message(body,label)
+        nav.getOrNull(tab)?.requestFocus()
+    }
+    private fun showFeedError(problem: Throwable) {
+        invalidatePage(); releaseCatalogViews(); screen="catalog"; feedMode=true
+        val container=base(); buildNav(container)
+        val body=column(); container.addView(body,lp(-1,0).apply { weight=1f })
+        error(body,problem) { if(feedMode) enterFeed() }
+        currentFocus?.let { retry -> nav.forEach { it.nextFocusDownId=retry.id } }
     }
     /** 切到推荐里的另一部：先存当前这部的位置，再取详情并从上次看到的地方继续。 */
     private fun playFeedSeries(series: Series) {
-        if(screen=="player" && detail?.series?.id==series.id && !playError) return
+        feedSeriesId=series.id
+        if(screen=="player" && player!=null && detail?.series?.id==series.id && !playError) return
         saveProgress(); library.flush(); player?.pause()
         if(screen!="player") Toast.makeText(this,"正在打开《${series.title}》…",Toast.LENGTH_SHORT).show()
         if(screen=="player" && ::playbackText.isInitialized) { playbackText.text="正在切换到《${series.title}》…"; showHud() }
@@ -1202,10 +1240,37 @@ class MainActivity: Activity() {
         else if(hasMore) { pendingFeedIndex=pending; appendFeedBatch() }
         else finishFeed()
     }
+    /** 一批推荐看完：自动换一批新的接着播，所以推荐可以一直看下去。 */
     private fun finishFeed() {
         pendingFeedIndex=null
+        refreshFeedSession()
+    }
+    /**
+     * 换一批：在后台取新的一批再切过去，当前这一部先停在画面上不拆播放器，
+     * 所以换一批不会把正在看的内容打断成一张空白加载页。
+     */
+    private fun refreshFeedSession() {
+        if(feedRefreshJob!=null) return
         requestedAutoplay=false; player?.pause()
-        if(screen=="player" && ::playbackText.isInitialized) { playbackText.text="本次推荐已看完，可返回推荐页点「换一批」"; showPanel() }
+        if(screen=="player" && ::playbackText.isInitialized) { playbackText.text="正在为你换一批…"; showHud() }
+        newRecommendSession()
+        val mode=recommendMode; val tags=recommendTags; val startPage=recommendStartPage()
+        val hidden=if(library.isLoaded) library.hidden() else emptySet()
+        feedRefreshJob=io.submit {
+            val candidates=runCatching { recommendPool(1,mode,tags,startPage,hidden) }.getOrNull()
+            main.post {
+                feedRefreshJob=null
+                if(!foreground || !feedMode || screen!="player") return@post
+                if(candidates==null || candidates.isEmpty()) {
+                    if(::playbackText.isInitialized) { playbackText.text="暂时没有更多推荐 · 可打开菜单选「换一批」再试"; showHud() }
+                    return@post
+                }
+                mergeRecommendBatch(1,candidates)
+                val next=catalog.firstOrNull() ?: return@post
+                feedIndex=0; pendingFeedIndex=null; catalogFocus=next.id; feedSeriesId=next.id
+                playFeedSeries(next)
+            }
+        }
     }
     /** 后台续一批推荐：不打断当前播放，失败就等下一次切换再试。 */
     private fun appendFeedBatch() {
@@ -1225,7 +1290,7 @@ class MainActivity: Activity() {
             }
         }
     }
-    private fun playbackHintText()=if(feedMode) "确认 暂停/播放    左右 快退/快进    ↑ 上一部    ↓ 下一部    菜单 选集等" else "确认 暂停/播放    左右 快退/快进    ↓ 选集    ↑ 更多    返回 收起 / 退出"
+    private fun playbackHintText()=if(feedMode) "确认 暂停/播放    ↑/↓ 换一部    左右 快退/快进    菜单 打开菜单    返回 收起菜单" else "确认 暂停/播放    左右 快退/快进    ↓ 选集    ↑ 更多    返回 收起 / 退出"
     private fun showDetail(focusEpisode: Boolean) {
         invalidatePage(); releaseCatalogViews(); screen="detail"; val data=detail ?: return showCatalog()
         val body=base("剧集详情")
@@ -1313,6 +1378,11 @@ class MainActivity: Activity() {
                 setKeepContentOnPlayerReset(true); setShutterBackgroundColor(Color.BLACK); setShowBuffering(PlayerView.SHOW_BUFFERING_ALWAYS)
             }
             playerView=view; root.addView(view,FrameLayout.LayoutParams(-1,-1))
+            if(feedMode) {
+                // 推荐连播的顶部浮层：导航与剧集信息，跟底部 hud 一起出现与收起。
+                feedTop=column().apply { background=GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM,intArrayOf(Color.argb(225,11,15,21),Color.argb(150,11,15,21),Color.TRANSPARENT)) }
+                feedTopReady=true; root.addView(feedTop,FrameLayout.LayoutParams(-1,-2,Gravity.TOP))
+            } else feedTopReady=false
             hud=column().apply { setPadding(dp(widthDp()*.05f),dp(20),dp(widthDp()*.05f),(resources.displayMetrics.heightPixels*.05f).toInt()); background=GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM,intArrayOf(Color.TRANSPARENT,Color.argb(240,11,15,21))) }
             playbackTitle=text("",23f).apply { maxLines=1; ellipsize=TextUtils.TruncateAt.END; setTypeface(null,Typeface.BOLD) }; hud.addView(playbackTitle)
             playbackText=text("",15f,muted).apply { setPadding(0,dp(10),0,dp(9)) }; hud.addView(playbackText)
@@ -1322,9 +1392,10 @@ class MainActivity: Activity() {
             root.addView(ScrollView(this).apply { isVerticalScrollBarEnabled=false; addView(hud) },FrameLayout.LayoutParams(-1,-2,Gravity.BOTTOM))
         }
         playbackTitle.text="${data.series.title}  ·  第 ${episodeIndex+1} 集"+(if(feedMode) "  ·  推荐连播" else "")
+        playbackTitle.visibility=if(feedMode) View.GONE else View.VISIBLE
         playbackHint?.text=playbackHintText()
         playbackText.text="正在获取播放地址…"; progressBar.progress=0; progressBar.visibility=View.VISIBLE; hidePlaybackOverlay()
-        controls.removeAllViews(); controls.visibility=View.GONE; transportPlay=null; sleepButton=null
+        if(feedMode) { renderFeedChrome(); showHud() } else { controls.removeAllViews(); controls.visibility=View.GONE; transportPlay=null; sleepButton=null }
         syncMediaSession()
         val requestedId=data.episodes[episodeIndex]; val maxQuality=library.maxQuality; val ticket=generation
         work({ prefetched ?: RemoteVideo(repository.http,repository.stream(requestedId,maxQuality)).prepare() }, { remote ->
@@ -1442,15 +1513,90 @@ class MainActivity: Activity() {
     }
     private fun hidePlaybackOverlay() {
         main.removeCallbacks(hideHud)
-        panel=false; controls.visibility=View.GONE; controls.clearFocus(); hud.visibility=View.GONE
+        panel=false; controls.clearFocus()
+        if(!feedMode) controls.visibility=View.GONE
+        hud.visibility=View.GONE; if(feedTopReady) feedTop.visibility=View.GONE
     }
     private fun showHud() {
         if(screen!="player") return
-        hud.visibility=View.VISIBLE; updatePlaybackText(); main.removeCallbacks(hideHud)
+        hud.visibility=View.VISIBLE; if(feedTopReady) feedTop.visibility=View.VISIBLE
+        if(feedMode && !playError) controls.visibility=View.VISIBLE
+        updatePlaybackText(); main.removeCallbacks(hideHud)
         if(!panel && player?.isPlaying==true) main.postDelayed(hideHud,4500)
     }
+    /**
+     * 推荐连播的浮层内容：顶部导航与剧集信息，底部操作行。每次换集/换部都重建。
+     * 浮层与 hud 同步出现；菜单打开时（panel=true）焦点落在导航上。
+     */
+    private fun renderFeedChrome() {
+        val data=detail ?: return
+        if(!feedTopReady) return
+        feedTop.removeAllViews(); nav.clear(); buildNav(feedTop,false)
+        val info=column().apply { setPadding(dp(widthDp()*.05f),dp(6),0,dp(14)) }
+        info.addView(text("第 ${episodeIndex+1} 集",13f,bg).apply { setPadding(dp(11),dp(5),dp(11),dp(5)); background=rounded(accent) })
+        info.addView(text(data.series.title,25f).apply { setTypeface(null,Typeface.BOLD); maxLines=1; ellipsize=TextUtils.TruncateAt.END; setPadding(0,dp(9),0,0) })
+        val meta=mutableListOf("第 ${episodeIndex+1} 集","共 ${data.episodes.size} 集")
+        if(data.series.badge.isNotBlank()) meta+=data.series.badge
+        info.addView(text(meta.joinToString("  ·  "),13f,muted).apply { setPadding(0,dp(7),0,0) })
+        val tags=feedTagText(data.series.tags)
+        if(tags.isNotBlank()) info.addView(text(tags,13f,accent).apply { maxLines=1; ellipsize=TextUtils.TruncateAt.END; setPadding(0,dp(7),0,0) })
+        if(data.series.description.isNotBlank()) info.addView(text(data.series.description,14f,muted).apply { maxLines=2; ellipsize=TextUtils.TruncateAt.END; setPadding(0,dp(7),dp(24),0) },lp(dp(widthDp()*.58f),-2))
+        feedTop.addView(info)
+        buildFeedActions(data)
+        if(panel) nav.getOrNull(TAB_RECOMMEND)?.requestFocus()
+    }
+    /** 网站给的题材用「·」分隔，连播浮层里按标签样子展示。 */
+    private fun feedTagText(tags: String)=tags.split(" · ",",","，","/").map { it.trim() }.filter { it.isNotEmpty() }.take(5).joinToString("  ") { "#$it" }
+    /** 推荐连播底部操作行：暂停播放 / 下一集 / 合集 / 追剧 / 倍速 / 清晰度 / 更多设置 / 换一批。 */
+    private fun buildFeedActions(data: Detail) {
+        controls.removeAllViews()
+        val bar=HorizontalScrollView(this).apply { isHorizontalScrollBarEnabled=false; clipToPadding=false }
+        val actions=row(); bar.addView(actions); controls.addView(bar,lp(-1,-2))
+        transportPlay=addButton(actions,if(player?.playWhenReady==true) "暂停播放" else "继续播放") { togglePlayback(); hidePlaybackOverlay() }
+        addButton(actions,"下一集") { skipEpisode(1) }
+        val shortTitle=if(data.series.title.length>12) data.series.title.take(12)+"…" else data.series.title
+        lateinit var collection: TextView
+        collection=addButton(actions,"合集：$shortTitle｜全${data.episodes.size}集") { showEpisodePanel(collection) }
+        lateinit var favorite: TextView
+        favorite=addButton(actions,if(library.favorite(data.series.id)) "已追剧" else "追剧") {
+            favoriteMonitor.stop()
+            val saved=library.toggle(data.series)
+            if(saved) library.observeFavorite(data.series.id,data.episodes.size,System.currentTimeMillis(),acknowledge=true)
+            favorite.text=if(saved) "已追剧" else "追剧"
+            Toast.makeText(this,if(saved) "已追剧，收藏里有更新会提醒" else "已取消追剧",Toast.LENGTH_SHORT).show()
+        }
+        lateinit var speed: TextView
+        speed=addButton(actions,"倍速 ${PlaybackSpeed.label(library.playbackSpeed)}") { showSpeedPicker(speed) }
+        lateinit var quality: TextView
+        quality=addButton(actions,"清晰度 ${library.maxQuality}P") { showQualityPicker(quality,true) }
+        lateinit var more: TextView
+        more=addButton(actions,"更多设置") {
+            tvTools.choose("播放设置",listOf("倍速 ${PlaybackSpeed.label(library.playbackSpeed)}","清晰度 ${library.maxQuality}P","画面 ${library.frameMode.label}","定时 ${sleepTimer.label()}","从头播放"),more,{ choice ->
+                main.post {
+                    if(screen=="player" && more.isAttachedToWindow) when(choice) {
+                        0 -> showSpeedPicker(more)
+                        1 -> showQualityPicker(more,true)
+                        2 -> showFramePicker(more,true)
+                        3 -> showSleepPicker(more)
+                        4 -> { seekTo(0); hidePlaybackOverlay() }
+                    }
+                }
+            })
+        }.apply { tag="playback-settings" }
+        addButton(actions,"换一批") { refreshFeedSession() }
+        controls.visibility=View.VISIBLE
+        val up=nav.getOrNull(TAB_RECOMMEND)?.id ?: View.NO_ID
+        for(index in 0 until actions.childCount) actions.getChildAt(index).nextFocusUpId=up
+        nav.forEach { it.nextFocusDownId=transportPlay?.id ?: View.NO_ID }
+    }
+    /** 打开推荐连播的菜单：浮层可聚焦，左右选导航，下进操作行。 */
+    private fun revealFeedChrome() {
+        if(screen!="player" || !feedMode || episodePanel!=null || tvTools.showing) return
+        panel=true; showHud(); controls.visibility=View.VISIBLE
+        (nav.getOrNull(TAB_RECOMMEND) ?: transportPlay)?.requestFocus()
+    }
     private fun updatePlaybackText() {
-        transportPlay?.text=if(player?.playWhenReady==true) "暂停" else "播放"
+        transportPlay?.text=if(feedMode) if(player?.playWhenReady==true) "暂停播放" else "继续播放" else if(player?.playWhenReady==true) "暂停" else "播放"
         sleepButton?.text="定时 ${sleepTimer.label()}"
         if(screen!="player" || playError) return
         if(sleepStopped) { playbackText.text="定时停止已生效 · 观看位置已保存 · 按播放可继续"; return }
@@ -1501,6 +1647,7 @@ class MainActivity: Activity() {
         mediaSession.update(data.series.title,episodeIndex,p?.duration?.coerceAtLeast(0) ?: 0,currentPosition(),library.playbackSpeed,state,episodeIndex>0 || feedPrevious,episodeIndex<data.episodes.lastIndex || feedNext)
     }
     private fun stopForSleep() {
+        if(screen!="player") return
         sleepStopped=true; requestedAutoplay=false; retryAutoplay=false; pausedForLifecycle=true
         cancelRecovery(); player?.pause(); saveProgress()
         window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
@@ -1535,6 +1682,7 @@ class MainActivity: Activity() {
     }
     private fun showPanel() {
         if(playError) return
+        if(feedMode) { revealFeedChrome(); return }
         panel=true; showHud(); controls.visibility=View.VISIBLE; controls.removeAllViews()
         val transport=row(); controls.addView(transport)
         val play=addButton(transport,if(player?.playWhenReady==true) "暂停" else "播放") { togglePlayback() }.also { transportPlay=it }
@@ -1640,10 +1788,28 @@ class MainActivity: Activity() {
     private fun goBack() {
         if(!library.isLoaded) { finish(); return }
         when(screen) {
-            "player" -> if(hud.visibility==View.VISIBLE && !playError) hidePlaybackOverlay() else returnToDetail()
+            "player" -> if(feedMode) feedBack() else if(hud.visibility==View.VISIBLE && !playError) hidePlaybackOverlay() else returnToDetail()
             "detail" -> showCatalog()
             else -> if(collection!=null) { leaveCollection(); showCatalog() } else if(nav.any { it.hasFocus() }) { if(tab!=TAB_HOME) { switchTab(TAB_HOME); nav[TAB_HOME].requestFocus() } else finish() } else nav.getOrNull(tab)?.requestFocus()
         }
+    }
+    /**
+     * 推荐连播的返回：菜单开着就先收起菜单，菜单收起时按一次先把菜单叫出来；
+     * 两次连续按（2.5 秒内）则退出应用，所以返回键不会在观看时直接把播放关掉。
+     */
+    private fun feedBack() {
+        if(playError) { directPlayback=true; returnToDetail(); return }
+        val now=android.os.SystemClock.elapsedRealtime()
+        val recent=feedBackAt!=0L && now-feedBackAt<2500
+        if(hud.visibility==View.VISIBLE) {
+            hidePlaybackOverlay(); feedBackAt=0
+            if(recent) { saveProgress(); library.flush(); finish() }
+            return
+        }
+        if(recent) { feedBackAt=0; saveProgress(); library.flush(); finish(); return }
+        feedBackAt=now
+        Toast.makeText(this,"再按一次返回键退出应用",Toast.LENGTH_SHORT).show()
+        revealFeedChrome()
     }
     @Deprecated("TV remote back is handled through the activity")
     override fun onBackPressed()=goBack()
@@ -1664,16 +1830,19 @@ class MainActivity: Activity() {
                 }
                 return true
             }
+            if(key==KeyEvent.KEYCODE_MENU) {
+                // 推荐连播用菜单键开关浮层菜单；普通播放沿用原来的设置面板。
+                if(event.action==KeyEvent.ACTION_DOWN && event.repeatCount==0) { if(feedMode) { if(panel) hidePlaybackOverlay() else revealFeedChrome() } else if(!panel) showPanel() }
+                return true
+            }
             if(!panel) {
-                if(key in listOf(KeyEvent.KEYCODE_DPAD_LEFT,KeyEvent.KEYCODE_DPAD_RIGHT,KeyEvent.KEYCODE_DPAD_CENTER,KeyEvent.KEYCODE_ENTER,KeyEvent.KEYCODE_DPAD_UP,KeyEvent.KEYCODE_DPAD_DOWN,KeyEvent.KEYCODE_MENU)) {
+                if(key in listOf(KeyEvent.KEYCODE_DPAD_LEFT,KeyEvent.KEYCODE_DPAD_RIGHT,KeyEvent.KEYCODE_DPAD_CENTER,KeyEvent.KEYCODE_ENTER,KeyEvent.KEYCODE_DPAD_UP,KeyEvent.KEYCODE_DPAD_DOWN)) {
                     if(event.action==KeyEvent.ACTION_DOWN) when(key) {
                         KeyEvent.KEYCODE_DPAD_LEFT -> seek(-1,event.repeatCount)
                         KeyEvent.KEYCODE_DPAD_RIGHT -> seek(1,event.repeatCount)
-                        KeyEvent.KEYCODE_DPAD_CENTER,KeyEvent.KEYCODE_ENTER -> if(event.repeatCount==0) togglePlayback() else if(feedMode && !panel) showPanel()
+                        KeyEvent.KEYCODE_DPAD_CENTER,KeyEvent.KEYCODE_ENTER -> if(event.repeatCount==0) togglePlayback() else if(feedMode) revealFeedChrome() else showPanel()
                         KeyEvent.KEYCODE_DPAD_DOWN -> if(event.repeatCount==0) { if(feedMode && episodePanel==null) switchFeed(1) else showEpisodePanel(hud) }
                         KeyEvent.KEYCODE_DPAD_UP -> if(event.repeatCount==0) { if(feedMode && episodePanel==null) switchFeed(-1) else showPanel() }
-                        KeyEvent.KEYCODE_MENU -> if(event.repeatCount==0) showPanel()
-                        else -> showHud()
                     }
                     return true
                 }

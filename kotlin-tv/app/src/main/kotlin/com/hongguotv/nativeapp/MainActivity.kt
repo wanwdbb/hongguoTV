@@ -70,6 +70,12 @@ class MainActivity: Activity() {
     private var playerListener: Player.Listener?=null
     private lateinit var playbackTitle: TextView
     private var directPlayback=false
+    /** 推荐连播：推荐页确认即播放，播放中 ↑/↓ 换上一部/下一部。 */
+    private var feedMode=false
+    private var feedIndex=0
+    private var pendingFeedIndex: Int?=null
+    private var feedBatchJob: java.util.concurrent.Future<*>?=null
+    private var playbackHint: TextView?=null
     private var collection: String?=null
     private var collectionReturn: CatalogState?=null
     private var collectionFocus=""
@@ -419,10 +425,9 @@ class MainActivity: Activity() {
         if(candidates.isEmpty()) throw java.io.IOException("推荐来源暂时无法连接")
         return candidates
     }
-    /** 把一批推荐续到片单后面，并记下卡片上的类型角标。 */
-    private fun applyRecommendBatch(batch: Int,candidates: List<RecommendCandidate>,body: LinearLayout,focusNav: Boolean,focusType: Boolean) {
-        val session=recommendSession
-        if(session==null) { catalog=emptyList(); hasMore=false; body.removeAllViews(); catalogGrid(body,focusNav,focusType); return }
+    /** 把一批推荐并进片单：界面加载与推荐连播后台续批共用。 */
+    private fun mergeRecommendBatch(batch: Int,candidates: List<RecommendCandidate>): Boolean {
+        val session=recommendSession ?: return false
         candidates.groupBy { it.type }.forEach { (type,rows) -> rememberTypes(rows.map { it.series },type) }
         candidates.forEach { candidate -> recommendTypes[candidate.series.id]=candidate.type }
         val items=session.append(candidates).map { it.series }
@@ -430,6 +435,12 @@ class MainActivity: Activity() {
         hasMore=items.size>=RecommendSession.DEFAULT_LIMIT && batch<RECOMMEND_MAX_BATCH
         page=batch
         recommendLoading=false
+        return items.isNotEmpty()
+    }
+    /** 把一批推荐续到片单后面，并重画卡片（含类型角标）。 */
+    private fun applyRecommendBatch(batch: Int,candidates: List<RecommendCandidate>,body: LinearLayout,focusNav: Boolean,focusType: Boolean) {
+        if(recommendSession==null) { catalog=emptyList(); hasMore=false; body.removeAllViews(); catalogGrid(body,focusNav,focusType); return }
+        mergeRecommendBatch(batch,candidates)
         recommendSubtitle?.text=recommendSubtitleText()
         val keepNav=nav.any { it.hasFocus() }
         body.removeAllViews(); catalogGrid(body,keepNav || focusNav,focusType)
@@ -456,6 +467,7 @@ class MainActivity: Activity() {
         else if(recommendMode==RecommendMode.MIXED) "真人剧 50% · 漫剧 30% · AI剧 20%" else "只看${recommendMode.label}")
         parts+=if(recommendTags.isEmpty()) "先按各类型热门推荐" else "已参考你的收藏与观看"
         if(catalog.isNotEmpty()) parts+="已推荐 ${catalog.size} 部"
+        parts+="确认直接播放，播放中 ↑/↓ 换一部"
         return parts.joinToString(" · ")
     }
     private fun showRecommendModePicker(anchor: TextView) {
@@ -553,6 +565,7 @@ class MainActivity: Activity() {
     }
     private fun showCatalog(load: Boolean=false,focusNav: Boolean=false,focusType: Boolean=false) {
         initialCatalogPending=false; restoreStoppedPage=false; pendingDetail=null
+        feedMode=false; pendingFeedIndex=null
         // Never cache a new page number with the previous page's results while a request is pending.
         if(load) {
             val cached=if(tab==TAB_HOME && page==1) library.cachedHome(library.contentType) else null
@@ -851,7 +864,7 @@ class MainActivity: Activity() {
                 val progress=if(tab==TAB_HISTORY || collection=="resume") library.progress(item.id) else null
                 val badge=text(if(tab==TAB_FAVORITES) library.favoriteLabel(item.id) else if(tab==TAB_RANK) rankBadge else if(progress!=null) if(library.watched(item.id)) "整剧已看完" else "第 ${progress.episodeIndex+1} 集 · ${formatTime(progress.position)}" else item.badge,12f,if(tab==TAB_RANK || tab==TAB_FAVORITES) accent else muted).apply { maxLines=1; minLines=1; minHeight=dp(19); ellipsize=TextUtils.TruncateAt.END; setPadding(dp(3),0,0,0) }
                 card.addView(badge,lp(-1,-2)); if(tab==TAB_FAVORITES) favoriteBadges[item.id]=badge
-                card.setOnClickListener { catalogFocus=item.id; openDetail(item,tab==TAB_HISTORY || collection=="resume" || collection=="updates") }
+                card.setOnClickListener { catalogFocus=item.id; if(tab==TAB_RECOMMEND && collection==null) startFeed(item) else openDetail(item,tab==TAB_HISTORY || collection=="resume" || collection=="updates") }
                 card.setOnLongClickListener { catalogFocus=item.id; quickActions(item,card); true }
                 card.setOnKeyListener { _,key,event -> if(key==KeyEvent.KEYCODE_MENU) { if(event.action==KeyEvent.ACTION_UP) { catalogFocus=item.id; quickActions(item,card) }; true } else false }
                 card.setOnFocusChangeListener { _,focused -> card.background=TvStyle.card(this,focused); if(focused) { catalogFocus=item.id; loadCover(image,item.cover); preview.show(item,when { tab==TAB_RANK -> listOfNotNull(position?.rank?.let { "第 $it 名" },rankBadge).filter { it.isNotBlank() }.joinToString(" · "); recommendType!=null -> listOf(recommendType.label,selectionStatus(item)).filter { it.isNotBlank() }.joinToString(" · "); else -> selectionStatus(item) }); if(!restoringScroll) scroll.post { scroll.smoothScrollTo(0,when { line.top<scroll.scrollY -> line.top; line.bottom>scroll.scrollY+scroll.height -> (line.bottom-scroll.height).coerceAtLeast(0); else -> scroll.scrollY }) } } }
@@ -1004,7 +1017,7 @@ class MainActivity: Activity() {
         if(tab==TAB_HISTORY) labels+="管理观看记录"
         tvTools.choose(series.title,labels,anchor,{ choice ->
             when(choice) {
-                0 -> openDetail(series,true)
+                0 -> if(tab==TAB_RECOMMEND && collection==null) startFeed(series) else openDetail(series,true)
                 1 -> { val added=library.toggle(series); Toast.makeText(this,if(added) "已收藏" else "已取消收藏",Toast.LENGTH_SHORT).show(); refreshLibraryCards(series.id,!added && (tab==TAB_FAVORITES || collection=="updates")); if(added) favoriteMonitor.check() }
                 2 -> { val added=library.toggleLater(series); Toast.makeText(this,if(added) "已加入稍后看" else "已移出稍后看",Toast.LENGTH_SHORT).show(); refreshLibraryCards(series.id,!added && collection=="later") }
                 3 -> openDetail(series)
@@ -1139,6 +1152,80 @@ class MainActivity: Activity() {
             if(resume) playEpisode(target.index,target.position,autoplay=detailAutoplay) else showDetail(false)
         }, { problem -> error(body,problem) { openDetail(series,resume,detailAutoplay) } })
     }
+    /**
+     * 推荐连播：推荐页按确认直接播放，播放中 ↑/↓ 换上一部/下一部。
+     * 连播按推荐片单顺序走，切走的那一部会先存下播放位置。
+     */
+    private fun startFeed(series: Series) {
+        val index=catalog.indexOfFirst { it.id==series.id }
+        if(index<0) return
+        feedMode=true; feedIndex=index; pendingFeedIndex=null; directPlayback=true
+        catalogFocus=series.id
+        playFeedSeries(series)
+    }
+    /** 切到推荐里的另一部：先存当前这部的位置，再取详情并从上次看到的地方继续。 */
+    private fun playFeedSeries(series: Series) {
+        if(screen=="player" && detail?.series?.id==series.id && !playError) return
+        saveProgress(); library.flush(); player?.pause()
+        if(screen!="player") Toast.makeText(this,"正在打开《${series.title}》…",Toast.LENGTH_SHORT).show()
+        if(screen=="player" && ::playbackText.isInitialized) { playbackText.text="正在切换到《${series.title}》…"; showHud() }
+        work({ repository.detail(series.id) }, { result ->
+            detail=result; library.observeFavorite(series.id,result.episodes.size,System.currentTimeMillis(),acknowledge=true)
+            val progress=library.progress(series.id)
+            val target=ResumePlayback.target(result.episodes,progress?.episodeId,progress?.position ?: 0,progress?.completed==true)
+            playEpisode(target.index,target.position,autoplay=true,saveCurrent=false)
+        }, { problem ->
+            if(feedMode) Toast.makeText(this,"《${series.title}》暂时打不开，按 ↑/↓ 换一部",Toast.LENGTH_LONG).show()
+            if(screen=="player" && ::playbackText.isInitialized) showHud()
+        })
+    }
+    /** ↑/↓ 换部：超出已经取到的片单时先续一批。 */
+    private fun switchFeed(delta: Int) {
+        if(!feedMode) return
+        val target=feedIndex+delta
+        if(target<0) { Toast.makeText(this,"已经是推荐的上一部",Toast.LENGTH_SHORT).show(); return }
+        if(target>=catalog.size) {
+            pendingFeedIndex=target
+            if(!hasMore) finishFeed()
+            else { if(feedBatchJob==null) Toast.makeText(this,"正在加载更多推荐…",Toast.LENGTH_SHORT).show(); appendFeedBatch() }
+            return
+        }
+        feedIndex=target; catalogFocus=catalog[target].id
+        playFeedSeries(catalog[target])
+    }
+    /** 续批到达后再切：用户连按 ↓ 时不会白白丢掉这一次按键。 */
+    private fun handlePendingFeed() {
+        val pending=pendingFeedIndex ?: return
+        pendingFeedIndex=null
+        if(!feedMode || screen!="player") return
+        if(pending<catalog.size) { feedIndex=pending; catalogFocus=catalog[pending].id; playFeedSeries(catalog[pending]) }
+        else if(hasMore) { pendingFeedIndex=pending; appendFeedBatch() }
+        else finishFeed()
+    }
+    private fun finishFeed() {
+        pendingFeedIndex=null
+        requestedAutoplay=false; player?.pause()
+        if(screen=="player" && ::playbackText.isInitialized) { playbackText.text="本次推荐已看完，可返回推荐页点「换一批」"; showPanel() }
+    }
+    /** 后台续一批推荐：不打断当前播放，失败就等下一次切换再试。 */
+    private fun appendFeedBatch() {
+        if(feedBatchJob!=null || !hasMore || recommendSession==null) return
+        val batch=page+1; val session=recommendSession; val mode=recommendMode; val tags=recommendTags; val startPage=recommendStartPage()
+        val hidden=if(library.isLoaded) library.hidden() else emptySet()
+        feedBatchJob=io.submit {
+            val result=runCatching { recommendPool(batch,mode,tags,startPage,hidden) }
+            main.post {
+                feedBatchJob=null
+                if(isDestroyed || recommendSession!==session) return@post
+                result.onSuccess { candidates ->
+                    mergeRecommendBatch(batch,candidates)
+                    if(screen=="catalog" && tab==TAB_RECOMMEND) showCatalog()
+                    handlePendingFeed()
+                }
+            }
+        }
+    }
+    private fun playbackHintText()=if(feedMode) "确认 暂停/播放    左右 快退/快进    ↑ 上一部    ↓ 下一部    菜单 选集等" else "确认 暂停/播放    左右 快退/快进    ↓ 选集    ↑ 更多    返回 收起 / 退出"
     private fun showDetail(focusEpisode: Boolean) {
         invalidatePage(); releaseCatalogViews(); screen="detail"; val data=detail ?: return showCatalog()
         val body=base("剧集详情")
@@ -1190,7 +1277,7 @@ class MainActivity: Activity() {
         episodes.forEachIndexed { i,v -> v.nextFocusLeftId=if(i%10==0) v.id else episodes[i-1].id; v.nextFocusRightId=if(i%10==9 || i==episodes.lastIndex) v.id else episodes[i+1].id; if(i>=10) v.nextFocusUpId=episodes[i-10].id; v.nextFocusDownId=if(i+10<episodes.size) episodes[i+10].id else v.id }
         if(focusEpisode) episodes.getOrNull((episodeIndex-group*20).coerceIn(0,episodes.lastIndex))?.requestFocus() else play.requestFocus()
     }
-    private fun playEpisode(index: Int,position: Long=0,autoplay: Boolean=true,recovering: Boolean=false) {
+    private fun playEpisode(index: Int,position: Long=0,autoplay: Boolean=true,recovering: Boolean=false,saveCurrent: Boolean=true) {
         updater.interrupt()
         val data=detail ?: return
         val playbackStarted=android.os.SystemClock.elapsedRealtime()
@@ -1199,7 +1286,7 @@ class MainActivity: Activity() {
         val selectedIndex=index.coerceIn(0,data.episodes.lastIndex)
         val prefetched=if(position==0L && !recovering) preparedNext.take("${data.episodes[selectedIndex]}:${library.maxQuality}") else null
         val claimedHttp=if(prefetched!=null) prefetchHttp.also { prefetchHttp=null } else null
-        saveProgress(); library.flush(); invalidatePage(); favoriteMonitor.stop(); releaseCatalogViews()
+        if(saveCurrent) saveProgress(); library.flush(); invalidatePage(); favoriteMonitor.stop(); releaseCatalogViews()
         if(reuse) {
             cancelRecovery(); cancelPrefetch(); tvTools.close()
             episodePanel?.dismiss(); episodePanel=null; speedDialog?.dismiss(); speedDialog=null
@@ -1230,11 +1317,12 @@ class MainActivity: Activity() {
             playbackTitle=text("",23f).apply { maxLines=1; ellipsize=TextUtils.TruncateAt.END; setTypeface(null,Typeface.BOLD) }; hud.addView(playbackTitle)
             playbackText=text("",15f,muted).apply { setPadding(0,dp(10),0,dp(9)) }; hud.addView(playbackText)
             progressBar=ProgressBar(this,null,android.R.attr.progressBarStyleHorizontal).apply { max=1000; progressTintList=android.content.res.ColorStateList.valueOf(accent); progressBackgroundTintList=android.content.res.ColorStateList.valueOf(surface) }; hud.addView(progressBar,lp(-1,dp(4)))
-            hud.addView(text("确认 暂停/播放    左右 快退/快进    ↓ 选集    ↑ 更多    返回 收起 / 退出",13f,muted).apply { setPadding(0,dp(12),0,0) })
+            playbackHint=text(playbackHintText(),13f,muted); hud.addView(playbackHint!!,lp(-1,-2).apply { topMargin=dp(12) })
             controls=column().apply { setPadding(0,dp(12),0,0); visibility=View.GONE }; hud.addView(controls)
             root.addView(ScrollView(this).apply { isVerticalScrollBarEnabled=false; addView(hud) },FrameLayout.LayoutParams(-1,-2,Gravity.BOTTOM))
         }
-        playbackTitle.text="${data.series.title}  ·  第 ${episodeIndex+1} 集"
+        playbackTitle.text="${data.series.title}  ·  第 ${episodeIndex+1} 集"+(if(feedMode) "  ·  推荐连播" else "")
+        playbackHint?.text=playbackHintText()
         playbackText.text="正在获取播放地址…"; progressBar.progress=0; progressBar.visibility=View.VISIBLE; hidePlaybackOverlay()
         controls.removeAllViews(); controls.visibility=View.GONE; transportPlay=null; sleepButton=null
         syncMediaSession()
@@ -1269,6 +1357,7 @@ class MainActivity: Activity() {
                         saveProgress(true)
                         if(sleepTimer.episodeEnded()) stopForSleep()
                         else if(foreground && requestedAutoplay && !pausedForLifecycle && library.autoNext && episodeIndex<data.episodes.lastIndex) playEpisode(episodeIndex+1)
+                        else if(foreground && requestedAutoplay && !pausedForLifecycle && library.autoNext && feedMode) switchFeed(1)
                         else { requestedAutoplay=false; p.pause(); playbackText.text="本集已结束"; showPanel() }
                     }
                 }
@@ -1343,7 +1432,8 @@ class MainActivity: Activity() {
         val actions=row(); controls.addView(actions)
         addButton(actions,"立即重试") { playEpisode(episodeIndex,retryPosition,retryAutoplay) }.requestFocus()
         addButton(actions,"尝试 720P") { library.maxQuality=720; playEpisode(episodeIndex,retryPosition,retryAutoplay) }
-        addButton(actions,"返回选集") { returnToDetail(true) }
+        if(feedMode) addButton(actions,"换下一部") { panel=false; switchFeed(1) }
+        addButton(actions,if(feedMode) "返回推荐" else "返回选集") { if(feedMode) { directPlayback=true; returnToDetail() } else returnToDetail(true) }
         if(retryable && !sleepStopped) {
             addButton(controls,"停止自动重试") { cancelRecovery(); playbackText.text="自动重试已停止，观看位置已保留。" }
             autoRecovery=true; scheduleRecovery()
@@ -1392,6 +1482,8 @@ class MainActivity: Activity() {
         val count=detail?.episodes?.size ?: return
         val target=episodeIndex+direction
         if(target in 0 until count) playEpisode(target)
+        // 推荐连播时，媒体键的上一集/下一集在片头片尾顺势换成上一部/下一部。
+        else if(feedMode) switchFeed(direction)
     }
     private fun syncMediaSession() {
         if(!foreground || screen!="player") { mediaSession.deactivate(); return }
@@ -1404,7 +1496,9 @@ class MainActivity: Activity() {
             p.isPlaying -> android.media.session.PlaybackState.STATE_PLAYING
             else -> android.media.session.PlaybackState.STATE_PAUSED
         }
-        mediaSession.update(data.series.title,episodeIndex,p?.duration?.coerceAtLeast(0) ?: 0,currentPosition(),library.playbackSpeed,state,episodeIndex>0,episodeIndex<data.episodes.lastIndex)
+        val feedPrevious=feedMode && feedIndex>0
+        val feedNext=feedMode && (feedIndex+1<catalog.size || hasMore)
+        mediaSession.update(data.series.title,episodeIndex,p?.duration?.coerceAtLeast(0) ?: 0,currentPosition(),library.playbackSpeed,state,episodeIndex>0 || feedPrevious,episodeIndex<data.episodes.lastIndex || feedNext)
     }
     private fun stopForSleep() {
         sleepStopped=true; requestedAutoplay=false; retryAutoplay=false; pausedForLifecycle=true
@@ -1524,6 +1618,8 @@ class MainActivity: Activity() {
     private fun formatTime(millis: Long): String { val seconds=(millis.coerceAtLeast(0)/1000); return "%02d:%02d".format(seconds/60,seconds%60) }
     private fun saveProgress(completed: Boolean=false) {
         val p=player ?: return; val data=detail ?: return; if(!playbackReady || episodeIndex !in data.episodes.indices) return
+        // 切换剧集或切换推荐时播放器可能还停在上一部：不要把它写成这一部的进度。
+        if(p.currentMediaItem?.mediaId!=data.episodes[episodeIndex]) return
         library.save(WatchProgress(data.series,data.episodes[episodeIndex],episodeIndex,p.currentPosition.coerceAtLeast(0),p.duration.coerceAtLeast(0),completed || p.playbackState==Player.STATE_ENDED,System.currentTimeMillis()))
     }
     private fun releasePlayer() {
@@ -1573,9 +1669,10 @@ class MainActivity: Activity() {
                     if(event.action==KeyEvent.ACTION_DOWN) when(key) {
                         KeyEvent.KEYCODE_DPAD_LEFT -> seek(-1,event.repeatCount)
                         KeyEvent.KEYCODE_DPAD_RIGHT -> seek(1,event.repeatCount)
-                        KeyEvent.KEYCODE_DPAD_CENTER,KeyEvent.KEYCODE_ENTER -> if(event.repeatCount==0) togglePlayback()
-                        KeyEvent.KEYCODE_DPAD_DOWN -> if(event.repeatCount==0) showEpisodePanel(hud)
-                        KeyEvent.KEYCODE_DPAD_UP,KeyEvent.KEYCODE_MENU -> if(event.repeatCount==0) showPanel()
+                        KeyEvent.KEYCODE_DPAD_CENTER,KeyEvent.KEYCODE_ENTER -> if(event.repeatCount==0) togglePlayback() else if(feedMode && !panel) showPanel()
+                        KeyEvent.KEYCODE_DPAD_DOWN -> if(event.repeatCount==0) { if(feedMode && episodePanel==null) switchFeed(1) else showEpisodePanel(hud) }
+                        KeyEvent.KEYCODE_DPAD_UP -> if(event.repeatCount==0) { if(feedMode && episodePanel==null) switchFeed(-1) else showPanel() }
+                        KeyEvent.KEYCODE_MENU -> if(event.repeatCount==0) showPanel()
                         else -> showHud()
                     }
                     return true

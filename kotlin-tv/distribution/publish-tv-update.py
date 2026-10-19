@@ -16,7 +16,7 @@ assert f"versionCode='{code}'" in badging and f"versionName='{version}'" in badg
 commit=run('git','rev-parse','HEAD')
 manifest={'schema':1,'packageName':'com.hongguotv.nativeapp','versionCode':code,'versionName':version,'minSdk':26,'tag':tag,
  'sourceCommit':commit,'apk':{'name':apk.name,'size':apk.stat().st_size,'sha256':hashlib.sha256(apk.read_bytes()).hexdigest()},
- 'notes':'顶部新增「推荐」并作为启动默认页：混合理人剧 50% / 漫剧 30% / AI 剧 20%，按本机收藏与观看排序、每批预留 20% 探索；「换一批」换序、「加载更多」续批且同一会话不重复；设置里可切推荐模式与重置兴趣；直连 GitHub 超时会自动改用加速线路；应用内自动检查和下载更新。'}
+ 'notes':'推荐页确认卡片直接播放，播放中 ↑/↓ 换上一部/下一部，切走的剧会存下位置、回来接着看；一部播完自动接下一部，片单快到头会在后台续批；播放失败可一键「换下一部」；直连 GitHub 超时会自动改用加速线路；应用内自动检查和下载更新。'}
 (out/'update.json').write_text(json.dumps(manifest,ensure_ascii=False,indent=2)+'\n')
 source=out/f'hongguotv-{tag}-source.zip'; run('git','archive','--format=zip',f'--prefix=hongguotv-{tag}/','--output',str(source),'HEAD')
 notes=out/'release-notes.md'; notes.write_text(f'''Android 8.0+ 原生独立版，版本 {version}（versionCode {code}）。
@@ -24,6 +24,8 @@ notes=out/'release-notes.md'; notes.write_text(f'''Android 8.0+ 原生独立版�
 自动检查、下载新版并校验签名，确认后由系统安装。首次安装本版后，后续更新无需手动传 APK。直连 GitHub 超时或失败时自动改走加速线路，安装包仍做长度与 SHA-256 校验。电视需允许本应用安装未知来源应用；普通 Android 8 仍需确认系统安装。
 
 顶部新增「推荐」并作为启动默认页，顶部导航顺序为 推荐、首页、搜索、分类、排行榜、收藏、最近观看、设置。推荐参考混合内容池规则：默认真人剧 50%、漫剧 30%、AI 剧 20%，按收藏（每部 +4）与看过 30 秒以上（每部 +1）的题材兴趣排序，7 天内看过的降权、整剧看完的不再推荐，每批预留 20% 给没看过或陌生题材；卡面右上角标出类型，「换一批」换一个随机种子重新排，「加载更多」按批续在后面且同一会话不重复，单个类型抓取失败时由其它类型补足。
+
+本版的推荐改成直接连播：在推荐页确认卡片就直接开始播放（有记录时从上次看到的位置继续），播放中按 ↑ 是上一部、↓ 是下一部，切走的那一部会先存下位置，返回时继续；一部剧的最后一集播完并且开着「自动连播」时，自动接推荐里的下一部，片单快看到头会在后台再续一批。连播时选集、倍速等操作改到菜单键（或长按确认），普通播放（首页、详情、收藏、最近观看）按键不变；播放失败时多一个「换下一部」，可以跳过打不开的剧。想看简介或管理卡片，长按确认或按菜单键即可。
 
 设置 → 推荐里可切换「混合推荐 / 只看真人剧 / 只看漫剧 / 只看 AI 剧」，并可「重置兴趣」：收藏与观看记录保留，重置前的观看不再累计兴趣。隐藏过的剧不会出现在推荐里。
 

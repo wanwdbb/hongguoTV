@@ -13,12 +13,14 @@ import java.util.concurrent.TimeUnit
 internal fun JSONArray.objects() = (0 until length()).mapNotNull { optJSONObject(it) }
 internal fun JSONObject.str(key: String) = if (isNull(key)) "" else optString(key, "").trim()
 internal fun cleanUrl(s: String) = s.replace("\\/","/").replace("\\u002F","/",ignoreCase=true).replace("\\u0026","&").replace("&amp;","&")
+/** 网站流式 HTML 偶尔会在文本里留下 NUL 等控制字符，单行展示前先清理。 */
+internal fun cleanText(s: String) = s.filter { it.code>=32 }.replace(Regex("[\\s\\u00a0\\u3000]+")," ").trim()
 data class Series(val id: String, val title: String, val cover: String = "", val description: String = "", val badge: String = "", val tags: String = "") {
     fun toJson() = JSONObject().put("id",id).put("title",title).put("cover",cover).put("description",description).put("badge",badge).put("tags",tags)
     companion object { fun fromJson(o: JSONObject) = Series(o.str("id"),o.str("title"),o.str("cover"),o.str("description"),o.str("badge"),o.str("tags")) }
 }
 data class Detail(val series: Series, val episodes: List<String>)
-data class RankPosition(val rank: Int?, val heat: String)
+data class RankPosition(val rank: Int?, val heat: String, val status: String = "")
 data class ComicRanking(val positions: Map<String,RankPosition>, val totalPages: Int, val updatedText: String)
 data class CatalogPage(val items: List<Series>, val hasMore: Boolean, val ranking: ComicRanking? = null, val genres: List<CatalogGenre> = emptyList())
 data class StreamInfo(val url: String, val key: ByteArray?, val quality: String)
@@ -51,10 +53,13 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
         return Series(o.str("series_id"),o.str("series_name").ifEmpty { o.str("series_title").ifEmpty { item.str("name") } },cleanUrl(o.str("series_cover")),o.str("series_intro"),o.str("episode_right_text").ifEmpty { if(count>0) "全 ${count} 集" else "" },(0 until minOf(tags.length(),5)).joinToString(" · ") { tags.optJSONObject(it)?.str("name") ?: tags.optString(it) })
     }
     private fun valid(rows: List<Series>) = rows.filter { it.id.matches(Regex("[0-9]{1,30}")) && it.title.isNotBlank() }.distinctBy { it.id }
-    fun comicRanking(page: Int = 1): CatalogPage {
+    /** 热播榜：网站 `/rank/<榜单>?page=N`，名次与热度都用网站给出的值。 */
+    fun ranking(board: RankBoard = RankBoard.HONGGUO, page: Int = 1): CatalogPage {
         require(page in 1..100)
-        return ComicRank.parse(text("$site/rank/hot-comic-drama?page=$page"),page)
+        return RankPage.parse(text("$site${board.path}?page=$page"),page,board)
     }
+    /** 漫剧榜单：首页「漫剧」入口沿用。 */
+    fun comicRanking(page: Int = 1) = ranking(RankBoard.COMIC,page)
     fun home(page: Int = 1, type: ContentType = ContentType.SHORT): CatalogPage {
         require(page in 1..100)
         if(type==ContentType.COMIC) return comicRanking(page)

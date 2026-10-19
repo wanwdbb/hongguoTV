@@ -4,20 +4,24 @@ fun main(args: Array<String>) {
     val repository=ContentRepository()
     if(args.contains("--ranking")) {
         try {
-            val first=repository.comicRanking()
-            val metadata=checkNotNull(first.ranking)
-            check(first.items.isNotEmpty())
-            val seen=mutableSetOf<String>()
-            for(pageNumber in listOf(1,2,metadata.totalPages).distinct().filter { it<=metadata.totalPages }) {
-                val result=if(pageNumber==1) first else repository.comicRanking(pageNumber)
-                val ranking=checkNotNull(result.ranking)
-                check(result.items.isNotEmpty() && result.items.none { it.id in seen })
-                seen.addAll(result.items.map { it.id })
-                val ranks=result.items.map { checkNotNull(ranking.positions[it.id]).rank }
-                check(ranks.all { it!=null && it>0 } && ranks.filterNotNull().zipWithNext().all { (a,b) -> a<b })
-                check(result.items.all { ranking.positions[it.id]!!.heat.isNotBlank() })
-                check(result.hasMore==(pageNumber<ranking.totalPages))
-                println("rankingPage=$pageNumber/${ranking.totalPages}; items=${result.items.size}; ranks=${ranks.first()}..${ranks.last()}; firstHeat=${ranking.positions[result.items.first().id]!!.heat}; updated=${ranking.updatedText}")
+            for(board in RankBoard.entries) {
+                val first=repository.ranking(board)
+                val metadata=checkNotNull(first.ranking)
+                check(first.items.isNotEmpty())
+                val seen=mutableSetOf<String>()
+                for(pageNumber in listOf(1,2,metadata.totalPages).distinct().filter { it<=metadata.totalPages }) {
+                    val result=if(pageNumber==1) first else repository.ranking(board,pageNumber)
+                    val ranking=checkNotNull(result.ranking)
+                    check(result.items.isNotEmpty() && result.items.none { it.id in seen })
+                    seen.addAll(result.items.map { it.id })
+                    val ranks=result.items.map { checkNotNull(ranking.positions[it.id]).rank }
+                    check(ranks.all { it!=null && it>0 } && ranks.filterNotNull().zipWithNext().all { (a,b) -> a<b })
+                    check(result.items.all { ranking.positions[it.id]!!.heat.isNotBlank() })
+                    check(result.items.all { item -> item.title.isNotBlank() && item.title.none { it.code<32 } }) { "标题里残留控制字符" }
+                    check(result.hasMore==(pageNumber<ranking.totalPages))
+                    val status=result.items.firstNotNullOfOrNull { ranking.positions[it.id]!!.status.ifBlank { null } } ?: "-"
+                    println("board=${board.label}(${board.slug}); page=$pageNumber/${ranking.totalPages}; items=${result.items.size}; ranks=${ranks.first()}..${ranks.last()}; status=$status; firstHeat=${ranking.positions[result.items.first().id]!!.heat}; first=${result.items.first().title}; updated=${ranking.updatedText}")
+                }
             }
         } finally {
             repository.http.connectionPool.evictAll(); repository.http.dispatcher.executorService.shutdown()

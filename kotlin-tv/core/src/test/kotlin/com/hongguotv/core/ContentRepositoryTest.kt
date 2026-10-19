@@ -107,8 +107,59 @@ class ContentRepositoryTest {
         assertThrows(IllegalArgumentException::class.java) { repo.comicRanking(0) }
     }
 
-    @Test fun renderedLastPageCountsCurrentPageWithoutAnAnchor() {
+    private fun boardPayload(key: String, payload: JSONObject) = script("mergeLoaderData",JSONArray()
+        .put(key).put(JSONArray().put(JSONObject().put("key","content")
+            .put("routerDataFnName","p").put("routerDataFnArgs",JSONArray().put(payload.toString())))))
+
+    @Test fun rankingBoardsReadTheirOwnPathKeyAndStatus() {
+        for(board in RankBoard.entries) {
+            val payload=rankPayload()
+            payload.getJSONArray("rankList").getJSONObject(0).put("rank",7).put("heatText","1234万热度")
+                .put("statusTags",JSONArray().put("新剧")).put("title","第\u0000十季")
+            val repo=repository { request ->
+                assertEquals(board.path,request.url.encodedPath)
+                assertEquals("1",request.url.queryParameter("page"))
+                """<script>_ROUTER_DATA={"loaderData":{"${board.pageKey}":{"rankKey":"${board.rankKey}","pageNum":1,"updatedText":"今日已更新"}}};</script>"""+
+                    boardPayload(board.pageKey,payload)
+            }
+            val result=repo.ranking(board)
+            assertEquals(RankPosition(7,"1234万热度","新剧"),result.ranking!!.positions["123"])
+            assertEquals("第十季",result.items.single().title)
+            assertEquals("今日已更新",result.ranking.updatedText)
+        }
+    }
+
+    @Test fun rankingBoardKeepsAnotherBoardsPayloadOut() {
+        val repo=repository { boardPayload("rank_hot-real-drama/page",rankPayload()) }
+        assertThrows(IOException::class.java) { repo.ranking(RankBoard.COMIC) }
+    }
+
+    @Test fun aggregateBoardMatchesTheSitesOwnRankKey() {
         val repo=repository {
+            """<script>_ROUTER_DATA={"loaderData":{"rank_hot-drama/page":{"rankKey":"hongguo","pageNum":1}}};</script>
+                <article aria-labelledby="rank-title-123"><span class="pc-badge-number-example">1</span><h2 id="rank-title-123">聚宝仙盆</h2>
+                <li class="pc-status-tag-example">新剧</li><p class="pc-metrics-example">8370万热度</p></article>
+                <nav aria-label="榜单分页"><span aria-current="page">1</span><a href="/rank/hot-drama?page=5">5</a></nav>"""
+        }
+        val result=repo.ranking()
+        assertEquals(RankPosition(1,"8370万热度","新剧"),result.ranking!!.positions["123"])
+        assertEquals(5,result.ranking.totalPages)
+        assertTrue(result.hasMore)
+    }
+
+    @Test fun rankBoardFallbackKeepsUnknownSelectionUsable() {
+        assertEquals(RankBoard.HONGGUO,RankBoard.fromStored(null))
+        assertEquals(RankBoard.HONGGUO,RankBoard.fromStored("gone"))
+        assertEquals(RankBoard.AI,RankBoard.fromStored("hot-ai-drama"))
+        assertEquals("AI剧热播榜",RankBoard.AI.label)
+    }
+
+    @Test fun cleanTextRemovesStreamedControlCharacters() {
+        assertEquals("第五季",cleanText("第五\u0000\u0000季"))
+        assertEquals("红果 热播",cleanText(" 红果\u3000 热播 "))
+    }
+
+    @Test fun renderedLastPageCountsCurrentPageWithoutAnAnchor() {        val repo=repository {
             """<script>_ROUTER_DATA={"loaderData":{"rank_hot-comic-drama/page":{"rankKey":"comic","pageNum":5}}};</script>
                 <article aria-labelledby="rank-title-123"><span class="pc-badge-number-example">81</span><h2 id="rank-title-123">漫剧</h2></article>
                 <nav aria-label="榜单分页"><a href="/rank/hot-comic-drama?page=4">4</a><span aria-current="page">5</span></nav>"""

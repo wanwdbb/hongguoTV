@@ -50,15 +50,29 @@ class MainActivity: Activity() {
     private val repository=ContentRepository()
     private val networkCleanup=Executors.newSingleThreadExecutor()
     private val prefetchWorker=Executors.newSingleThreadExecutor()
+    private val feedPrefetchWorker=Executors.newSingleThreadExecutor()
     private var prefetchHttp: okhttp3.OkHttpClient?=null
     private var playbackHttp: okhttp3.OkHttpClient?=null
     private val preparedNext=PreparedSlot<RemoteVideo>({ android.os.SystemClock.elapsedRealtime() })
+    /** 推荐里前后两部的预取结果：换部时直接取用其中一部。 */
+    private val preparedSeries=PreparedCache<FeedReady>(2,{ android.os.SystemClock.elapsedRealtime() },10*60*1000L)
+    private var feedPrefetchJob: java.util.concurrent.Future<*>?=null
+    /** 每次重新预取或换一批都加一，旧任务发现编号变了就立刻停下。 */
+    private var feedPrefetchEpoch=0
+    private var feedPrefetchMark=""
     private var prefetchJob: java.util.concurrent.Future<*>?=null
     private var prefetchScope: RequestScope?=null
     private var prefetchedFor=""
     private var readySince=0L
     private lateinit var artwork: ArtworkLoader
     private data class DeferredUi(val apply: ()->Unit,val discard: ()->Unit={})
+    /**
+     * 预取好的一部推荐：详情、第一集和已经读到内存的首段视频。
+     * 换到这一部时详情与播放接口都不用再等，播放器创建后直接出画面。
+     */
+    private inner class FeedReady(val detail: Detail,val index: Int,val quality: Int,val remote: RemoteVideo,val http: okhttp3.OkHttpClient): java.io.Closeable {
+        override fun close() { runCatching { remote.close() }; closeTransport(http) }
+    }
     private var deferredWork: DeferredUi?=null
     private var initialCatalogPending=true
     private var restoreStoppedPage=false
@@ -224,6 +238,7 @@ class MainActivity: Activity() {
                 if(sleepTimer.poll()) stopForSleep()
                 if(hud.visibility==View.VISIBLE) updatePlaybackText()
                 maybePrefetch()
+                maybePrefetchFeed()
                 val now=android.os.SystemClock.elapsedRealtime()
                 if(player?.isPlaying==true && now-lastSaved>5000) { saveProgress(); lastSaved=now }
             }
@@ -1171,6 +1186,7 @@ class MainActivity: Activity() {
     /** 换一批：重新开一次推荐会话，取到第一批就从第一部开始播。 */
     private fun loadFeedSession() {
         feedMode=true; directPlayback=true
+        clearFeedPrefetch()
         if(screen=="player") { saveProgress(); library.flush(); releasePlayer() }
         catalog=emptyList(); hasMore=false; page=1; catalogFocus=""; feedSeriesId=""; pendingFeedIndex=null
         showFeedLoading("正在为你挑选内容…")
@@ -1207,15 +1223,23 @@ class MainActivity: Activity() {
         saveProgress(); library.flush(); player?.pause()
         if(screen!="player") Toast.makeText(this,"正在打开《${series.title}》…",Toast.LENGTH_SHORT).show()
         if(screen=="player" && ::playbackText.isInitialized) { playbackText.text="正在切换到《${series.title}》…"; showHud() }
-        work({ repository.detail(series.id) }, { result ->
-            detail=result; library.observeFavorite(series.id,result.episodes.size,System.currentTimeMillis(),acknowledge=true)
-            val progress=library.progress(series.id)
-            val target=ResumePlayback.target(result.episodes,progress?.episodeId,progress?.position ?: 0,progress?.completed==true)
-            playEpisode(target.index,target.position,autoplay=true,saveCurrent=false)
-        }, { problem ->
+        val ready=preparedSeries.take(series.id)
+        val known=ready?.detail ?: detail?.takeIf { it.series.id==series.id }
+        if(known!=null) { invalidatePage(); startFeedEpisode(series,known,ready); return }
+        work({ repository.detail(series.id) }, { result -> startFeedEpisode(series,result,ready) }, { problem ->
+            ready?.close()
             if(feedMode) Toast.makeText(this,"《${series.title}》暂时打不开，按 ↑/↓ 换一部",Toast.LENGTH_LONG).show()
             if(screen=="player" && ::playbackText.isInitialized) showHud()
         })
+    }
+    /** 详情已经拿到：从上次的位置开播；预取的第一集对得上就直接用，省掉播放接口和首屏缓冲。 */
+    private fun startFeedEpisode(series: Series,data: Detail,ready: FeedReady?) {
+        detail=data; library.observeFavorite(series.id,data.episodes.size,System.currentTimeMillis(),acknowledge=true)
+        val progress=library.progress(series.id)
+        val target=ResumePlayback.target(data.episodes,progress?.episodeId,progress?.position ?: 0,progress?.completed==true)
+        val usable=ready?.takeIf { it.index==target.index && it.quality==library.maxQuality }
+        if(usable==null) ready?.close()
+        playEpisode(target.index,target.position,autoplay=true,saveCurrent=false,ready=usable)
     }
     /** ↑/↓ 换部：超出已经取到的片单时先续一批。 */
     private fun switchFeed(delta: Int) {
@@ -1252,6 +1276,7 @@ class MainActivity: Activity() {
     private fun refreshFeedSession() {
         if(feedRefreshJob!=null) return
         requestedAutoplay=false; player?.pause()
+        clearFeedPrefetch()
         if(screen=="player" && ::playbackText.isInitialized) { playbackText.text="正在为你换一批…"; showHud() }
         newRecommendSession()
         val mode=recommendMode; val tags=recommendTags; val startPage=recommendStartPage()
@@ -1342,15 +1367,15 @@ class MainActivity: Activity() {
         episodes.forEachIndexed { i,v -> v.nextFocusLeftId=if(i%10==0) v.id else episodes[i-1].id; v.nextFocusRightId=if(i%10==9 || i==episodes.lastIndex) v.id else episodes[i+1].id; if(i>=10) v.nextFocusUpId=episodes[i-10].id; v.nextFocusDownId=if(i+10<episodes.size) episodes[i+10].id else v.id }
         if(focusEpisode) episodes.getOrNull((episodeIndex-group*20).coerceIn(0,episodes.lastIndex))?.requestFocus() else play.requestFocus()
     }
-    private fun playEpisode(index: Int,position: Long=0,autoplay: Boolean=true,recovering: Boolean=false,saveCurrent: Boolean=true) {
+    private fun playEpisode(index: Int,position: Long=0,autoplay: Boolean=true,recovering: Boolean=false,saveCurrent: Boolean=true,ready: FeedReady?=null) {
         updater.interrupt()
         val data=detail ?: return
         val playbackStarted=android.os.SystemClock.elapsedRealtime()
         val reuse=screen=="player" && player!=null && playerView!=null && !recovering && !playError
         library.setWatched(data.series.id,false)
         val selectedIndex=index.coerceIn(0,data.episodes.lastIndex)
-        val prefetched=if(position==0L && !recovering) preparedNext.take("${data.episodes[selectedIndex]}:${library.maxQuality}") else null
-        val claimedHttp=if(prefetched!=null) prefetchHttp.also { prefetchHttp=null } else null
+        val prefetched=ready?.remote ?: if(position==0L && !recovering) preparedNext.take("${data.episodes[selectedIndex]}:${library.maxQuality}") else null
+        val claimedHttp=when { ready!=null -> ready.http; prefetched!=null -> prefetchHttp.also { prefetchHttp=null }; else -> null }
         if(saveCurrent) saveProgress(); library.flush(); invalidatePage(); favoriteMonitor.stop(); releaseCatalogViews()
         if(reuse) {
             cancelRecovery(); cancelPrefetch(); tvTools.close()
@@ -1457,6 +1482,58 @@ class MainActivity: Activity() {
         prefetchScope?.cancel(); prefetchScope=null
         preparedNext.clear(); prefetchJob?.cancel(true); prefetchJob=null
         closeTransport(prefetchHttp); prefetchHttp=null; prefetchedFor=""
+        cancelFeedPrefetch()
+    }
+    /** 停下正在准备的相邻剧集；已经准备好的留着，换回来还能直接用。 */
+    private fun cancelFeedPrefetch() {
+        feedPrefetchEpoch++; feedPrefetchJob?.cancel(true); feedPrefetchJob=null; feedPrefetchMark=""
+    }
+    /** 换一批或重新开一次推荐会话时，丢掉上一批的相邻预取。 */
+    private fun clearFeedPrefetch() { cancelFeedPrefetch(); preparedSeries.clear() }
+    /**
+     * 推荐连播的预缓存：播放稳定后把前后两部的详情、续播的那一集和它的首段视频取好，
+     * ↑/↓ 换部时省掉详情、播放接口和首屏缓冲，切换几乎没有等待。
+     * 每部只在开始播和快播完时各准备一次，长时间挂着也不会反复消耗流量。
+     */
+    private fun maybePrefetchFeed() {
+        if(!feedMode || screen!="player" || playError || !playbackReady || !foreground) return
+        val p=player ?: return
+        if(!p.isPlaying || connectivity.isActiveNetworkMetered || !networkAvailable()) return
+        if(readySince==0L || android.os.SystemClock.elapsedRealtime()-readySince<3000) return
+        if(p.bufferedPosition-p.currentPosition<5000) return
+        val stage=if(PrefetchPolicy.nearEnd(p.currentPosition,p.duration,p.playbackParameters.speed)) "end" else "start"
+        val mark="${detail?.series?.id}:$feedIndex:$stage"
+        if(mark==feedPrefetchMark || feedPrefetchJob?.isDone==false) return
+        val neighbors=listOf(feedIndex+1,feedIndex-1).filter { it in catalog.indices }.map { catalog[it] }
+        if(neighbors.isEmpty()) return
+        feedPrefetchMark=mark
+        val epoch=++feedPrefetchEpoch
+        val quality=library.maxQuality
+        val progress=neighbors.associate { it.id to library.progress(it.id) }
+        android.util.Log.i("HongguoTV","Feed prefetch start neighbors=${neighbors.size} quality=$quality stage=$stage")
+        feedPrefetchJob=feedPrefetchWorker.submit { prefetchFeedNeighbors(epoch,neighbors,quality,progress) }
+    }
+    /** 按顺序准备相邻两部；编号变了（已换部或退出推荐）就立刻停下并放掉连接。 */
+    private fun prefetchFeedNeighbors(epoch: Int,neighbors: List<Series>,quality: Int,progress: Map<String,BackupProgress?>) {
+        for(series in neighbors) {
+            if(epoch!=feedPrefetchEpoch) return
+            if(preparedSeries.fresh(series.id)) continue
+            val http=okhttp3.OkHttpClient.Builder().connectTimeout(8,java.util.concurrent.TimeUnit.SECONDS).readTimeout(12,java.util.concurrent.TimeUnit.SECONDS).callTimeout(20,java.util.concurrent.TimeUnit.SECONDS).build()
+            try {
+                val source=ContentRepository(http)
+                val data=source.detail(series.id)
+                if(epoch!=feedPrefetchEpoch) { closeTransport(http); return }
+                val saved=progress[series.id]
+                val target=ResumePlayback.target(data.episodes,saved?.episodeId,saved?.position ?: 0,saved?.completed==true)
+                val remote=RemoteVideo(http,source.stream(data.episodes[target.index],quality)).also { it.warm() }
+                if(epoch!=feedPrefetchEpoch) { remote.close(); closeTransport(http); return }
+                preparedSeries.put(series.id,FeedReady(data,target.index,quality,remote,http))
+                android.util.Log.i("HongguoTV","Feed neighbor prepared series=${series.id} episode=${target.index+1} quality=$quality")
+            } catch(problem: Exception) {
+                android.util.Log.w("HongguoTV","Feed neighbor failed series=${series.id}: ${problem.message}")
+                closeTransport(http)
+            }
+        }
     }
     private fun maybePrefetch() {
         val p=player ?: return; val data=detail ?: return
@@ -1892,14 +1969,14 @@ class MainActivity: Activity() {
     override fun onTrimMemory(level: Int) {
         super.onTrimMemory(level)
         if(::artwork.isInitialized) artwork.trimMemory(level)
-        if(level>=android.content.ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW) cancelPrefetch()
+        if(level>=android.content.ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW) { cancelPrefetch(); preparedSeries.clear() }
     }
     override fun onDestroy() {
         generation++; cancelWork()
         if(networkRegistered) connectivity.unregisterNetworkCallback(networkCallback)
         favoriteMonitor.destroy(); tvTools.destroy(); updater.destroy(); saveProgress(); releasePlayer(); library.close()
         artwork.close(); releaseCatalogViews(); mediaSession.release(); main.removeCallbacksAndMessages(null)
-        io.shutdownNow(); prefetchWorker.shutdownNow(); networkCleanup.shutdown()
+        io.shutdownNow(); prefetchWorker.shutdownNow(); feedPrefetchWorker.shutdownNow(); preparedSeries.clear(); networkCleanup.shutdown()
         Thread({ repository.http.dispatcher.cancelAll(); repository.http.connectionPool.evictAll(); repository.http.dispatcher.executorService.shutdown() },"hongguotv-network-cleanup").start()
         super.onDestroy()
     }

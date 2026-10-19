@@ -16,9 +16,9 @@ assert f"versionCode='{code}'" in badging and f"versionName='{version}'" in badg
 commit=run('git','rev-parse','HEAD')
 manifest={'schema':1,'packageName':'com.hongguotv.nativeapp','versionCode':code,'versionName':version,'minSdk':26,'tag':tag,
  'sourceCommit':commit,'apk':{'name':apk.name,'size':apk.stat().st_size,'sha256':hashlib.sha256(apk.read_bytes()).hexdigest()},
- 'notes':'推荐改成进入就自动连播的页面、不再显示卡片：顶部导航、本集信息与底部操作行随时可调出，↑/↓ 换一部、确认 暂停/播放、菜单 打开菜单、连按两次返回退出，切到别的页会自动保存并停止，「换一批」在后台换、不打断；直连 GitHub 超时会自动改用加速线路；应用内自动检查和下载更新。'}
+ 'notes':'推荐改成进入就自动连播的页面、不再显示卡片：顶部导航、本集信息与底部操作行随时可调出，↑/↓ 换一部、确认 暂停/播放、菜单 打开菜单、连按两次返回退出，切到别的页会自动保存并停止，「换一批」在后台换、不打断；推荐会提前缓存前后两部的详情与接下来要播的那一集，↑/↓ 换部更快；直连 GitHub 超时会自动改用加速线路；应用内自动检查和下载更新。'}
 (out/'update.json').write_text(json.dumps(manifest,ensure_ascii=False,indent=2)+'\n')
-source=out/f'hongguotv-{tag}-source.zip'; run('git','archive','--format=zip',f'--prefix=hongguotv-{tag}/','--output',str(source),'HEAD')
+source=out/f'hongguotv-{version}-source.zip'; run('git','archive','--format=zip',f'--prefix=hongguotv-{version}/','--output',str(source),'HEAD')
 notes=out/'release-notes.md'; notes.write_text(f'''Android 8.0+ 原生独立版，版本 {version}（versionCode {code}）。
 
 自动检查、下载新版并校验签名，确认后由系统安装。首次安装本版后，后续更新无需手动传 APK。直连 GitHub 超时或失败时自动改走加速线路，安装包仍做长度与 SHA-256 校验。电视需允许本应用安装未知来源应用；普通 Android 8 仍需确认系统安装。
@@ -29,6 +29,8 @@ notes=out/'release-notes.md'; notes.write_text(f'''Android 8.0+ 原生独立版�
 
 画面上叠了一层参考版式的浮层：顶部是同一排导航入口，左上是本集信息（第 N 集、剧名、共 N 集、类型标签、简介），底部是操作行（暂停播放 / 下一集 / 合集 / 追剧 / 倍速 / 清晰度 / 更多设置 / 换一批）加进度条、时间与按键提示。浮层收起时 确认 暂停/播放、左右 快退/快进、↑/↓ 换一部、菜单 叫出浮层；浮层打开时方向键在导航与操作行之间移动、确认 执行、返回 收起；连按两次返回退出应用。播放约 4.5 秒后浮层自动隐藏，暂停中或浮层里有焦点时保持显示。切到首页、分类、排行榜等其它页会立即停止播放并保存位置，回到推荐接着看这一部。普通播放（首页、详情、收藏、最近观看）的界面与按键保持不变；播放失败时仍可一键「换下一部」。
 
+本版给播放器加了预缓存：推荐连播播放稳定后，会在后台把前后两部的详情、续播的那一集（没看过的剧就是第一集）和它的首段视频先取好，按 ↑/↓ 换部时直接用手上这份内容，不再等详情接口、播放接口和首屏缓冲；一集快播完时会再刷新一次，自动接下一部时也已经就绪。预取只在非计费网络下进行，换一批、切换网络或退出播放时立即释放，内存占用只有几 MB；已经预取过的剧再次打开时，详情也不会重复请求。
+
 设置 → 推荐里可切换「混合推荐 / 只看真人剧 / 只看漫剧 / 只看 AI 剧」，并可「重置兴趣」：收藏与观看记录保留，重置前的观看不再累计兴趣。隐藏过的剧不会出现在推荐里。
 
 顶部「分类」按网站分类页浏览：真人剧、漫剧、AI 剧、漫画四种内容类型，真人剧 24 个题材、漫剧与 AI 剧各 8 个题材，片单直接显示并支持翻页；同一分类的片单 10 分钟内直接复用。
@@ -38,7 +40,7 @@ notes=out/'release-notes.md'; notes.write_text(f'''Android 8.0+ 原生独立版�
 自动构建的源码提交：{commit}。测试与 Release lint 通过后才发布。
 
 - APK：电视安装文件。
-- source.zip：与 APK 对应的完整原生源码，GPL-3.0。
+- source.zip（hongguotv-{version}-source.zip）：与 APK 对应的完整原生源码，GPL-3.0。
 - update.json：电视更新元数据，含版本、文件长度与 SHA-256。
 - SHA256SUMS：附件校验和。
 

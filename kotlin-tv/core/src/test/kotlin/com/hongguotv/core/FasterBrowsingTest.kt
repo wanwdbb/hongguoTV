@@ -23,6 +23,24 @@ class FasterBrowsingTest {
         val expired=Resource(); slot.complete(slot.begin("2:1080"),"2:1080",expired); now=102
         assertNull(slot.take("2:1080")); assertTrue(expired.closed)
     }
+    @Test fun preparedCacheKeepsOnlyNeighborsAndTransfersOwnership() {
+        var now=1L; val cache=PreparedCache<Resource>(2,{now})
+        val first=Resource(); val second=Resource(); val third=Resource()
+        cache.put("a",first); cache.put("b",second); cache.put("c",third)
+        assertTrue("超出容量时关闭最早的预取",first.closed)
+        assertTrue(cache.fresh("b")); assertSame(second,cache.take("b")); assertFalse("取用不关闭",second.closed)
+        assertNull(cache.take("b"))
+        cache.put("d",Resource()); cache.put("e",Resource())
+        assertTrue("再次超容量时关闭 c",third.closed)
+        cache.clear(); assertNull(cache.take("d")); assertNull(cache.take("e"))
+    }
+    @Test fun preparedCacheRejectsExpiredAndRolledBackEntries() {
+        var now=1000L; val cache=PreparedCache<Resource>(2,{now},ttl=100)
+        val expired=Resource(); cache.put("a",expired); now=1101
+        assertFalse(cache.fresh("a")); assertNull(cache.take("a")); assertTrue(expired.closed)
+        val rolledBack=Resource(); cache.put("b",rolledBack); now=900
+        assertFalse(cache.fresh("b")); assertNull(cache.take("b")); assertTrue(rolledBack.closed)
+    }
     @Test fun staleCompletionCannotReplaceNewEpisodeOrRepopulateAfterExit() {
         val slot=PreparedSlot<Resource>({1L}); val first=slot.begin("1"); val second=slot.begin("2")
         val stale=Resource(); assertFalse(slot.complete(first,"1",stale)); assertTrue(stale.closed)

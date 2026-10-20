@@ -12,6 +12,11 @@ import java.util.concurrent.TimeUnit
 
 internal fun JSONArray.objects() = (0 until length()).mapNotNull { optJSONObject(it) }
 internal fun JSONObject.str(key: String) = if (isNull(key)) "" else optString(key, "").trim()
+/** App 搜索接口：未注册设备会被风控挡下（HTTP 200 空响应），见 [ContentRepository.registerDevice]。 */
+private const val SEARCH_API = "https://api5-normal-sinfonlinea.fqnovel.com/reading/bookapi/search/tab/v"
+private const val REGISTER_API = "https://log5-applog.fqnovel.com/service/2/device_register/"
+/** 官方搜索第一页只给 6 条（「综合」页），首页拼两页补足一屏。 */
+private const val FIRST_PAGE_BATCHES = 2
 internal fun cleanUrl(s: String) = s.replace("\\/","/").replace("\\u002F","/",ignoreCase=true).replace("\\u0026","&").replace("&amp;","&")
 /** 网站流式 HTML 偶尔会在文本里留下 NUL 等控制字符，单行展示前先清理。 */
 internal fun cleanText(s: String) = s.filter { it.code>=32 }.replace(Regex("[\\s\\u00a0\\u3000]+")," ").trim()
@@ -24,6 +29,7 @@ data class RankPosition(val rank: Int?, val heat: String, val status: String = "
 data class ComicRanking(val positions: Map<String,RankPosition>, val totalPages: Int, val updatedText: String)
 data class CatalogPage(val items: List<Series>, val hasMore: Boolean, val ranking: ComicRanking? = null, val genres: List<CatalogGenre> = emptyList())
 data class StreamInfo(val url: String, val key: ByteArray?, val quality: String)
+data class DeviceRegistration(val installId: String, val deviceId: String)
 class SearchSessionExpiredException: IOException("搜索结果已过期，请从第 1 页重新搜索")
 
 class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectTimeout(15,TimeUnit.SECONDS).readTimeout(30,TimeUnit.SECONDS).callTimeout(45,TimeUnit.SECONDS).build(), private val clock: () -> Long = System::currentTimeMillis) {
@@ -102,23 +108,53 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
         return CatalogPage(items,items.isNotEmpty() && page<100)
     }
     private fun appSearch(keyword: String, page: Int, type: ContentType): CatalogPage {
-        val values=VendorConstants.device.toMutableMap()
-        for(k in listOf("version_code","manifest_version_code","update_version_code","pv_player")) values[k]="72232"
-        values["version_name"]="7.2.2.32"
-        values.putAll(linkedMapOf("query" to keyword,"count" to "20","offset" to ((page-1)*20).toString(),"tab_type" to type.searchTab.toString(),"bookshelf_search_plan" to "4","use_correct" to "true","user_is_login" to "0"))
         val cursor=synchronized(searchCursors) {
             val now=clock()
             searchCursors.entries.removeAll { now-it.value.updatedAt>300000 || (page==1 && it.key.first==type && it.key.second==keyword) }
             searchCursors[Triple(type,keyword,page-1)]
         }
-        if(type==ContentType.COMIC && page>1 && cursor==null) throw SearchSessionExpiredException()
-        cursor?.let {
-            if(it.searchId.isNotBlank()) values["search_id"]=it.searchId
-            if(it.passback.isNotBlank()) values["passback"]=it.passback
-            it.offset?.takeIf { offset -> offset>=0 }?.let { offset -> values["offset"]=offset.toString() }
+        if(page>1 && cursor==null) throw SearchSessionExpiredException()
+        val collected=linkedMapOf<String,Series>()
+        var hasMore=false
+        var next=cursor
+        // 官方第一页只给 6 条（「综合」页），从第二页起每次 20 条；第一屏补一页，免得看起来"结果太少"。
+        var batches=0
+        while(batches < if(page==1) FIRST_PAGE_BATCHES else 1) {
+            val batch=try { searchBatch(keyword,page,type,next) } catch (e: Exception) { if(batches==0) throw e else break }
+            batch.items.forEach { collected[it.id]=it }
+            hasMore=batch.hasMore
+            next=batch.cursor
+            batches++
+            if(!hasMore || next.isExhausted()) break
         }
-        val signed=signer.sign("https://api5-normal-sinfonlinea.fqnovel.com/reading/bookapi/search/tab/v",values)
-        val data=JSONObject(text(signed.url,signed))
+        synchronized(searchCursors) {
+            next?.let { searchCursors[Triple(type,keyword,page)]=it }
+            while(searchCursors.size>100) searchCursors.remove(searchCursors.keys.first())
+        }
+        return CatalogPage(valid(collected.values.toList()),hasMore && page<100)
+    }
+    private data class SearchBatch(val items: List<Series>, val hasMore: Boolean, val cursor: SearchCursor)
+    private fun searchBatch(keyword: String, page: Int, type: ContentType, cursor: SearchCursor?): SearchBatch {
+        val values=VendorConstants.device.toMutableMap()
+        for(k in listOf("version_code","manifest_version_code","update_version_code","pv_player")) values[k]="72232"
+        values["version_name"]="7.2.2.32"
+        values.putAll(linkedMapOf(
+            "query" to keyword,"count" to "20","offset" to ((page-1)*20).toString(),"tab_type" to type.searchTab.toString(),
+            "bookshelf_search_plan" to "4","use_correct" to "false","user_is_login" to "0","bookstore_tab" to "16",
+            "search_source" to "1","search_source_id" to "clks###","tab_name" to "feed"
+        ))
+        if(cursor==null) values["is_first_enter_search"]="true"
+        if(cursor!=null) {
+            if(cursor.searchId.isNotBlank()) values["search_id"]=cursor.searchId
+            if(cursor.passback.isNotBlank()) values["passback"]=cursor.passback
+            cursor.offset?.takeIf { offset -> offset>=0 }?.let { offset -> values["offset"]=offset.toString() }
+            values["last_search_page_query"]=keyword
+        }
+        val signed=signer.sign(SEARCH_API,values)
+        val raw=text(signed.url,signed)
+        // 未注册的设备会被风控挡下：HTTP 200、空响应体。
+        if(raw.isBlank()) throw IOException("搜索接口暂不可用")
+        val data=JSONObject(raw)
         if(data.optInt("code",-1)!=0) throw IOException("搜索接口暂不可用")
         val tabs=data.optJSONArray("search_tabs") ?: data.optJSONObject("data")?.optJSONArray("search_tabs") ?: throw IOException("搜索格式异常")
         val tab=tabs.objects().firstOrNull { it.optInt("tab_type")==type.searchTab } ?: throw IOException("${type.label}搜索暂不可用")
@@ -128,17 +164,67 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
             runCatching { JSONObject(cell.str("lynx_data")).optJSONArray("cell_data")?.objects() }.getOrNull()?.let { cells.addAll(it) }
             for(row in cells) {
                 val video=row.optJSONArray("video_data")?.objects()?.firstOrNull() ?: continue
-                val id=video.str("series_id").ifEmpty { row.str("book_id").ifEmpty { row.str("search_result_id") } }
-                val title=row.optJSONObject("search_high_light")?.optJSONObject("title")?.str("text").orEmpty().ifEmpty { video.str("title").ifEmpty { row.str("cell_name") } }
+                // 合集、话题这类卡片没有 series_id，不能当剧集展示。
+                val id=video.str("series_id")
+                if(!id.matches(Regex("[0-9]{1,30}"))) continue
+                val title=row.optJSONObject("search_high_light")?.optJSONObject("title")?.str("text").orEmpty().ifEmpty { video.str("title") }
                 val count=video.optInt("episode_cnt")
                 list+=Series(id,title,cleanUrl(video.str("cover").ifEmpty { video.str("cover_url") }),video.str("video_desc"),if(count>0) "全 $count 集" else video.str("rec_text"),video.str("sub_title"))
             }
         }
-        synchronized(searchCursors) {
-            searchCursors[Triple(type,keyword,page)]=SearchCursor(tab.str("search_id"),tab.str("passback"),tab.str("next_offset").toIntOrNull(),clock())
-            while(searchCursors.size>100) searchCursors.remove(searchCursors.keys.first())
+        return SearchBatch(list,tab.optBoolean("has_more",false),SearchCursor(tab.str("search_id"),tab.str("passback"),tab.str("next_offset").toIntOrNull(),clock()))
+    }
+    private fun SearchCursor?.isExhausted() = this==null || (searchId.isBlank() && passback.isBlank() && offset==null)
+    /**
+     * 设备注册：官方 App 启动时用一次，换取可以长期复用的 install_id/device_id。
+     * 搜索等接口只对已注册设备返回数据，未注册时会被风控挡下（HTTP 200 空响应）。
+     */
+    fun registerDevice(): DeviceRegistration {
+        val now=clock()
+        val request=Request.Builder().url("$REGISTER_API?aid=8662&version_code=71332&channel=update_64&package=com.phoenix.read&_rticket=$now&use_store_region_cookie=1&okhttp_version=4.2.243.31-douyin")
+            .header("User-Agent",VendorConstants.APP_UA)
+            .header("Accept","application/json")
+            .header("Accept-Language","zh-CN,zh;q=0.9")
+            .header("log-encode-type","gzip")
+            .header("x-ss-req-ticket",now.toString())
+            .header("x-vc-bdturing-sdk-version","3.7.2.cn")
+            .header("Cookie","store-region=cn-zj; store-region-src=did;")
+            .post(registrationPayload().toByteArray(Charsets.UTF_8).toRequestBody("application/json; charset=utf-8".toMediaType()))
+            .build()
+        val raw=RequestScope.execute(http.newCall(request)) { response ->
+            if(!response.isSuccessful) throw IOException("设备注册失败（HTTP ${response.code}）")
+            response.body?.bytes()?.toString(Charsets.UTF_8).orEmpty()
         }
-        return CatalogPage(valid(list),tab.optBoolean("has_more",false) && page<100)
+        val deviceId=Regex("\"device_id\"\\s*:\\s*\"?([0-9]{1,30})").find(raw)?.groupValues?.get(1)
+        val installId=Regex("\"install_id\"\\s*:\\s*\"?([0-9]{1,30})").find(raw)?.groupValues?.get(1)
+        if(deviceId==null || installId==null) throw IOException("设备注册被拒绝")
+        return DeviceRegistration(installId,deviceId)
+    }
+    /** 官方 `ss_app_log` 注册包的等价 JSON，字段跟 App 的查询参数保持一致。 */
+    private fun registrationPayload(): String {
+        val now=clock()
+        val androidId=(1..8).joinToString("") { "%02x".format(kotlin.random.Random.nextInt(256)) }
+        val openudid=digest("MD5",androidId.toByteArray()).hex().let { it+digest("MD5",it.toByteArray()).hex().take(8) }
+        val header=JSONObject()
+            .put("display_name","红果免费短剧").put("aid",8662).put("channel","update_64").put("package","com.phoenix.read")
+            .put("app_version","7.1.3.32").put("version_code",71332).put("update_version_code",71332).put("manifest_version_code",71332)
+            .put("app_version_minor","7.1.3.32").put("sdk_version","3.7.0-rc.25-fanqie-xiaoshuo-opt").put("sdk_target_version",29)
+            .put("git_hash","5b6a0d3").put("sdk_flavor","china").put("guest_mode",0).put("is_system_app",0)
+            .put("pre_installed_channel","").put("not_request_sender",0).put("os","Android")
+            .put("os_version","16").put("os_api",36)
+            .put("device_model","25053RT47C").put("device_brand","Redmi").put("device_manufacturer","Redmi").put("cpu_abi","arm64-v8a")
+            .put("release_build","BP2A.250605.031.A3").put("density_dpi",520).put("display_density","xxxhdpi").put("resolution","1280x2772")
+            .put("language","zh").put("timezone",8).put("access","wifi").put("rom","1414").put("rom_version","BP2A.250605.031.A3")
+            .put("cdid",java.util.UUID.randomUUID().toString())
+            .put("sig_hash",ByteArray(16).also { kotlin.random.Random.nextBytes(it) }.hex())
+            .put("openudid",openudid)
+            .put("clientudid",java.util.UUID.randomUUID().toString())
+            .put("ipv6_list",JSONArray().put(JSONObject().put("type","client_anpi").put("value","2409:8a00:1:1:2:3:4:5")))
+            .put("region","CN").put("tz_name","Asia/Shanghai").put("tz_offset",28800).put("sim_serial_number",JSONArray())
+            .put("oaid_may_support",false).put("req_id",java.util.UUID.randomUUID().toString()).put("device_platform","android")
+            .put("custom",JSONObject().put("host_bit",64).put("account_region","cn").put("dragon_device_type","phone"))
+            .put("apk_first_install_time",now-2_592_000_000L)
+        return JSONObject().put("magic_tag","ss_app_log").put("header",header).put("_gen_time",now).toString()
     }
     fun detail(id: String): Detail {
         require(id.matches(Regex("[0-9]{1,30}")))

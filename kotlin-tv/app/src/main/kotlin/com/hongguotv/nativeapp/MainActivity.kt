@@ -125,6 +125,13 @@ class MainActivity: Activity() {
     private val sleepTimer=SleepTimer { android.os.SystemClock.elapsedRealtime() }
     private var sleepStopped=false
     private var playerView: PlayerView?=null
+    /** 竖屏视频两侧的封面底，模糊后铺满，替代大片黑边。 */
+    private var backdrop: ImageView?=null
+    private var backdropCover=""
+    /** 当前视频的宽高比（已考虑旋转），0 表示还没拿到画面尺寸。 */
+    private var videoAspect=0f
+    /** 是否为竖屏画面（决定推荐信息区宽度与封面底）。 */
+    private var feedPortrait=false
     private lateinit var favoriteMonitor: FavoriteMonitor
     private val favoriteBadges=mutableMapOf<String,TextView>()
     private var favoriteStatus: TextView?=null
@@ -175,6 +182,19 @@ class MainActivity: Activity() {
     private val tabState=mutableMapOf<Int,CatalogState>()
     private val tabFocus=mutableMapOf<Int,String>()
     private val nav=mutableListOf<View>()
+    private class NavGroup(val label: String,val tabs: List<Int>)
+    /** 一级导航只留四个入口；同一组里的页面变成页内分栏，遥控器少走几步。 */
+    private val navGroups=listOf(
+        NavGroup("推荐",listOf(TAB_RECOMMEND)),
+        NavGroup("搜索",listOf(TAB_SEARCH)),
+        NavGroup("片库",listOf(TAB_HOME,TAB_CATEGORY,TAB_RANK)),
+        NavGroup("我的",listOf(TAB_HISTORY,TAB_FAVORITES,TAB_SETTINGS)))
+    private val sectionTitles=mapOf(
+        TAB_HOME to "首页",TAB_CATEGORY to "分类",TAB_RANK to "排行榜",
+        TAB_HISTORY to "最近观看",TAB_FAVORITES to "收藏",TAB_SETTINGS to "设置")
+    private val sectionButtons=mutableMapOf<Int,TextView>()
+    /** 每个一级入口上次停在哪个分栏，左右移出再移回来不会跳回第一栏。 */
+    private val sectionMemory=mutableMapOf<Int,Int>()
     private val typeButtons=mutableMapOf<ContentType,View>()
     private data class CatalogCache(val items: List<Series>,val hasMore: Boolean,val ranking: ComicRanking?,val genres: List<CatalogGenre>,val at: Long)
     private val categoryTypeButtons=mutableMapOf<CatalogType,View>()
@@ -276,6 +296,8 @@ class MainActivity: Activity() {
         mediaSession=TvMediaSession(this,{ if(foreground && screen=="player") requestPlayback(true) },{ if(foreground && screen=="player") requestPlayback(false) },{ position -> if(foreground && screen=="player") seekTo(position) },{ direction -> skipEpisode(direction) },{ if(foreground && screen=="player") returnToDetail() })
         message(base(),"正在读取本机记录…")
         restoreCategory(); restoreRankBoard(); restoreRecommend()
+        DeviceIdentityStore.restore(this)
+        DeviceIdentityStore.ensure(this,repository,io)
         loadLibrary()
     }
     private fun showLibraryError(problem: Throwable) {
@@ -320,6 +342,7 @@ class MainActivity: Activity() {
         catalogBody=null
         homeScreen=null; selectionPreview=null; catalogScroll=null
         nav.clear(); typeButtons.clear(); searchInput=null; searchButton=null; searchActions.clear()
+        sectionButtons.clear()
         categoryTypeButtons.clear(); categoryGenreButtons.clear(); categoryGenreRow=null; rankBoardButtons.clear()
         recommendRefresh=null; recommendMore=null; recommendSubtitle=null
         historyManage=null; rankRefresh=null; rankSubtitle=null; collectionBack=null; favoriteBadges.clear()
@@ -353,14 +376,18 @@ class MainActivity: Activity() {
         val detail=if(problem is java.net.UnknownHostException) "无法连接内容网站" else if(problem is java.net.SocketTimeoutException) "连接超时" else problem.message.orEmpty().replace(Regex("https?://\\S+"),"[地址]").take(160)
         parent.addView(text(detail,13f,muted)); addButton(parent,"重试",onClick=retry).requestFocus()
     }
-    private fun switchTab(next: Int) {
+    private fun switchTab(next: Int,section: Boolean=false,keepNav: Boolean=false) {
+        if(next==tab && screen=="catalog" && collection==null) {
+            if(section) sectionButtons[tab]?.requestFocus() else if(keepNav) nav.getOrNull(tab)?.requestFocus()
+            return
+        }
         leaveCollection()
         // 从推荐连播切到别的页：先把这一部的位置存下来并放掉播放器。
         if(next!=TAB_RECOMMEND && screen=="player" && feedMode) { saveProgress(); library.flush(); releasePlayer() }
         tabState[tab]=CatalogState(page,catalog,hasMore,ranking); tabFocus[tab]=catalogFocus
         tab=next; val saved=tabState[next]; page=saved?.page ?: 1; catalog=saved?.items ?: emptyList(); hasMore=saved?.hasMore ?: false; ranking=saved?.ranking; catalogFocus=tabFocus[next].orEmpty()
         val remote=next==TAB_HOME || next==TAB_RANK || next==TAB_CATEGORY || next==TAB_RECOMMEND || (next==TAB_SEARCH && query.isNotBlank())
-        showCatalog(load=remote && catalog.isEmpty())
+        showCatalog(load=remote && catalog.isEmpty(),focusNav=keepNav,focusSection=section)
     }
     private fun switchContentType(type: ContentType) {
         if(library.contentType==type) return
@@ -576,7 +603,6 @@ class MainActivity: Activity() {
         collectionReturn=CatalogState(page,catalog,hasMore,ranking); collectionFocus=catalogFocus
         collection=kind; page=1; catalogFocus=""; showCatalog()
     }
-    private fun inlineHomeFilters()=tab==TAB_HOME && resources.configuration.fontScale<=1.2f && widthDp()>=900
     private fun localCatalog()=tab==TAB_FAVORITES || tab==TAB_HISTORY || collection!=null
     /** 需要联网翻页的片单页（推荐、首页、搜索、排行榜、分类）。 */
     private fun remotePaged()=tab==TAB_HOME || tab==TAB_SEARCH || tab==TAB_RANK || tab==TAB_CATEGORY || tab==TAB_RECOMMEND
@@ -587,28 +613,74 @@ class MainActivity: Activity() {
         "resume" -> library.history().filterNot { library.watched(it.series.id) }.map { it.series }
         else -> if(tab==TAB_FAVORITES) library.favorites() else library.history().map { it.series }
     }
-    /** 顶部导航：片单页与推荐连播页共用同一排入口，切页靠 switchTab。 */
+    /** 顶部导航：四个分组入口（推荐/搜索/片库/我的），片单页与推荐连播页共用同一排。 */
     private fun buildNav(container: LinearLayout,divider: Boolean=true): LinearLayout {
         val top=row().apply { setPadding(0,0,0,dp(8)) }
         val brand=row()
         brand.addView(ImageView(this).apply { setImageResource(com.hongguotv.nativeapp.R.drawable.app_icon) },lp(dp(28),dp(28)).apply { rightMargin=dp(9) })
         brand.addView(text("红果",22f).apply { typeface=Typeface.create("sans-serif-medium",Typeface.NORMAL) })
         top.addView(brand,lp(dp(120),dp(44)))
-        listOf("推荐","首页","搜索","分类","排行榜","收藏","最近观看","设置").forEachIndexed { index,label ->
-            val item=addButton(top,label,index==tab) { switchTab(index) }
+        sectionButtons.clear()
+        navGroups.indexOfFirst { tab in it.tabs }.takeIf { it>=0 }?.let { sectionMemory[it]=tab }
+        val buttons=navGroups.mapIndexed { index,group ->
+            val active=tab in group.tabs
+            // 再次进入分组时停在原来的分栏，第一次进入用该组的第一栏。
+            val target=if(active) tab else sectionMemory[index] ?: group.tabs.first()
+            val item=addButton(top,group.label,active) { switchTab(target) }
             fun paint(focused: Boolean) {
-                item.setTextColor(if(focused) bg else if(index==tab) accent else muted)
-                item.background=rounded(if(focused) white else if(index==tab) Color.rgb(48,32,29) else Color.TRANSPARENT)
-                item.setTypeface(null,if(focused || index==tab) Typeface.BOLD else Typeface.NORMAL)
+                item.setTextColor(if(focused) bg else if(active) accent else muted)
+                item.background=rounded(if(focused) white else if(active) Color.rgb(48,32,29) else Color.TRANSPARENT)
+                item.setTypeface(null,if(focused || active) Typeface.BOLD else Typeface.NORMAL)
             }
-            paint(false); item.setOnFocusChangeListener { _,focused -> paint(focused) }; nav+=item
+            paint(false)
+            item.setOnFocusChangeListener { _,focused ->
+                paint(focused)
+                // 焦点移到别的入口就切过去（推荐是播放页，仍然只按确认进）；按下键自然落到新页的分栏。
+                if(focused && screen=="catalog" && target!=tab && group.tabs.first()!=TAB_RECOMMEND) {
+                    main.post { if(screen=="catalog" && target!=tab && item.hasFocus()) switchTab(target,keepNav=true) }
+                }
+            }
+            item
         }
+        // nav[tab] 仍按页签下标取「所属分组」的按钮，页面里原有的焦点接线不用改。
+        nav.clear(); repeat(TAB_SETTINGS+1) { nav+=buttons.first() }
+        navGroups.forEachIndexed { index,group -> group.tabs.forEach { nav[it]=buttons[index] } }
         container.addView(top)
         if(divider) container.addView(View(this).apply { setBackgroundColor(TvStyle.outline) },lp(-1,dp(1)).apply { bottomMargin=dp(6) })
         return top
     }
-    private fun showCatalog(load: Boolean=false,focusNav: Boolean=false,focusType: Boolean=false) {
+    /** 分组内的分栏（首页/分类/排行榜、最近观看/收藏/设置）：确认切换，顶部始终只有四个入口。 */
+    private fun buildSections(container: LinearLayout) {
+        val group=navGroups.firstOrNull { tab in it.tabs } ?: return
+        if(group.tabs.size<2) return
+        val bar=row().apply { setPadding(0,dp(2),0,dp(6)) }
+        bar.addView(text("分栏",12f,muted),lp(dp(42),-2))
+        group.tabs.forEach { target ->
+            val chip=addButton(bar,sectionTitles[target].orEmpty(),target==tab) { switchTab(target,section=true) }
+            chip.textSize=13f; chip.minHeight=dp(34); chip.setPadding(dp(12),dp(7),dp(12),dp(7))
+            chip.nextFocusUpId=nav.getOrNull(target)?.id ?: View.NO_ID
+            // 分栏按「页签」走：焦点移过去就切换，不用再按一次确认；左右比较分栏最顺手。
+            chip.setOnFocusChangeListener { _,focused ->
+                chip.background=rounded(if(focused) TvStyle.raised else if(target==tab) Color.rgb(61,39,34) else surface,if(focused) accent else Color.TRANSPARENT)
+                if(focused && screen=="catalog" && target!=tab) main.post { if(screen=="catalog" && target!=tab && chip.hasFocus()) switchTab(target,section=true) }
+            }
+            sectionButtons[target]=chip
+        }
+        container.addView(bar)
+    }
+    /** 导航的下键先落到分栏，分栏的下键再进片单；分栏的上键回导航。 */
+    private fun wireSections() {
+        val chip=sectionButtons[tab] ?: return
+        val down=nav.getOrNull(tab)?.nextFocusDownId ?: View.NO_ID
+        if(down!=View.NO_ID && down!=chip.id) chip.nextFocusDownId=down
+        nav.forEach { it.nextFocusDownId=chip.id }
+        // 片单上方的第一条（类型/题材/榜单/管理按钮）往上先回分栏，再往上才到导航。
+        (typeButtons.values+categoryTypeButtons.values+rankBoardButtons.values+listOfNotNull(favoriteCheck,historyManage))
+            .forEach { it.nextFocusUpId=chip.id }
+    }
+    private fun showCatalog(load: Boolean=false,focusNav: Boolean=false,focusType: Boolean=false,focusSection: Boolean=false) {
         initialCatalogPending=false; restoreStoppedPage=false; pendingDetail=null
+        val keepSection=sectionButtons.values.any { it.hasFocus() } || (focusSection && !focusNav)
         // 推荐页现在就是连播页：不再显示卡片，进入推荐立刻自动播放。
         if(tab==TAB_RECOMMEND && collection==null) { enterFeed(); return }
         feedMode=false; pendingFeedIndex=null
@@ -620,25 +692,22 @@ class MainActivity: Activity() {
         invalidatePage(); screen="catalog"; releaseCatalogViews(); val container=base()
         if(foreground && library.isLoaded && !favoriteMonitor.running) main.post { if(foreground && screen=="catalog") favoriteMonitor.check() }
         val top=buildNav(container)
+        buildSections(container)
         if(tab==TAB_SETTINGS) {
             val scroll=ScrollView(this); val body=column(); scroll.addView(body); container.addView(scroll,lp(-1,0).apply { weight=1f })
-            settings(body); if(focusNav) nav[tab].requestFocus(); return
+            settings(body); wireSections()
+            if(keepSection) sectionButtons[tab]?.requestFocus() else if(focusNav) nav[tab].requestFocus()
+            return
         }
         if((tab==TAB_HOME || tab==TAB_SEARCH)) {
             val types=row().apply { setPadding(0,dp(8),0,dp(6)) }
-            if(!inlineHomeFilters()) types.addView(text("片库",12f,muted),lp(dp(42),-2))
+            types.addView(text("类型",12f,muted),lp(dp(42),-2))
             ContentType.entries.forEach { type ->
                 typeButtons[type]=addButton(types,type.label,library.contentType==type) { switchContentType(type) }
                     .apply { isSelected=library.contentType==type; nextFocusUpId=nav[tab].id }
             }
-            if(inlineHomeFilters()) {
-                top.addView(Space(this),lp(0,1).apply { weight=1f })
-                typeButtons.values.forEach { view -> (view as TextView).apply { textSize=12f; minHeight=dp(34); setPadding(dp(12),dp(7),dp(12),dp(7)) } }
-                types.setPadding(0,0,0,0); top.addView(types)
-            } else {
-                if(tab==TAB_HOME) types.addView(text("长按确认 · 管理片单",12f,muted).apply { setPadding(dp(14),0,0,0) })
-                container.addView(types)
-            }
+            if(tab==TAB_HOME) types.addView(text("长按确认 · 管理片单",12f,muted).apply { setPadding(dp(14),0,0,0) })
+            container.addView(types)
             nav.forEach { it.nextFocusDownId=typeButtons.getValue(library.contentType).id }
         }
         if(tab==TAB_CATEGORY) {
@@ -711,6 +780,7 @@ class MainActivity: Activity() {
                 favoriteStatus=text(favoriteMonitor.status,13f,muted).apply { setPadding(0,0,0,dp(6)) }; container.addView(favoriteStatus)
             }
         }
+        wireSections()
         val body=column(); catalogBody=body; container.addView(body,lp(-1,0).apply { weight=1f })
         if(localCatalog()) {
             catalog=localItems(); ranking=null; page=page.coerceIn(1,maxOf(1,(catalog.size+pageSize-1)/pageSize)); hasMore=page*pageSize<catalog.size
@@ -740,7 +810,8 @@ class MainActivity: Activity() {
             else if(tab==TAB_RECOMMEND && catalog.isNotEmpty()) catalogGrid(body,false,false,loading=true)
             else {
                 message(body,"正在加载…")
-                if(focusType) typeButtons[library.contentType]?.requestFocus()
+                if(keepSection) sectionButtons[tab]?.requestFocus()
+                else if(focusType) typeButtons[library.contentType]?.requestFocus()
                 else if(tab==TAB_CATEGORY) categoryFocusTarget().requestFocus()
                 else if(tab==TAB_RANK) rankBoardButtons[rankBoard]?.requestFocus()
                 else nav[tab].requestFocus()
@@ -814,9 +885,12 @@ class MainActivity: Activity() {
                 }
             })
         } else catalogGrid(body,focusNav,focusType)
+        // 从分栏切过来时把焦点留在分栏上，方便继续左右比较或按下键进片单。
+        if(keepSection) sectionButtons[tab]?.requestFocus()
     }
     private fun catalogGrid(body: LinearLayout,focusNav: Boolean,focusType: Boolean=false,loading: Boolean=false) {
-        if(tab==TAB_HOME && page==1 && collection==null) { renderHome(body,focusNav,focusType,loading); return }
+        val keepSection=sectionButtons[tab]?.hasFocus()==true
+        if(tab==TAB_HOME && page==1 && collection==null) { renderHome(body,focusNav,focusType,loading,keepSection); return }
         resumeCards.clear(); catalogCards.clear(); cardImages.clear(); collectionBack=null
         if(collection!=null) {
             val heading=row()
@@ -860,6 +934,7 @@ class MainActivity: Activity() {
             }
             if(tab==TAB_RANK) rankRefresh?.let { refresh -> rankBoardButtons.values.forEach { it.nextFocusDownId=refresh.id }; refresh.nextFocusDownId=rankBoardButtons[rankBoard]?.id ?: nav[tab].id }
             if(focusType) typeButtons[library.contentType]?.requestFocus() else if(collectionBack!=null && !focusNav) collectionBack?.requestFocus() else if(tab==TAB_RANK) (rankBoardButtons[rankBoard] ?: rankRefresh)?.requestFocus() else if(tab==TAB_RECOMMEND) (recommendRefresh ?: nav[tab]).requestFocus() else if(focusNav || resumeCards.isEmpty()) nav[tab].requestFocus() else resumeCards.first().requestFocus()
+            if(keepSection) sectionButtons[tab]?.requestFocus()
             return
         }
         val cards=mutableListOf<View>(); val count=6; val gap=dp(14); val width=((resources.displayMetrics.widthPixels*.9f-gap*(count-1))/count).toInt()
@@ -937,10 +1012,12 @@ class MainActivity: Activity() {
         searchInput?.nextFocusDownId=cards.first().id
         searchButton?.nextFocusDownId=cards[minOf(4,cards.lastIndex)].id
         searchActions.forEach { it.nextFocusDownId=cards[minOf(4,cards.lastIndex)].id }
+        wireSections()
         if(focusType) typeButtons[library.contentType]?.requestFocus() else if(focusNav) nav[tab].requestFocus()
         else if(catalogFocus=="@more") (recommendMore?.takeIf { it.isFocusable } ?: cards.first()).requestFocus()
         else if(resumeCards.isNotEmpty() && (catalogFocus.isEmpty() || catalogFocus.startsWith("resume:"))) (resumeCards.firstOrNull { it.tag==catalogFocus } ?: resumeCards.first()).requestFocus()
         else cards[displayed.indexOfFirst { it.id==catalogFocus }.coerceAtLeast(0)].requestFocus()
+        if(keepSection) sectionButtons[tab]?.requestFocus()
         val savedScroll=scrollPositions[catalogPageKey]
         scroll.post {
             if(catalogScroll!==scroll) return@post
@@ -971,21 +1048,22 @@ class MainActivity: Activity() {
         return listOf(if(library.favorite(series.id)) "已收藏" else "",if(library.queued(series.id)) "稍后看" else "",
             if(library.watched(series.id)) "整剧已看完" else progress?.let { "上次第 ${it.episodeIndex+1} 集 · ${formatTime(it.position)}" }.orEmpty()).filter { it.isNotBlank() }.joinToString(" · ")
     }
-    private fun renderHome(body: LinearLayout,focusNav: Boolean,focusType: Boolean,loading: Boolean) {
+    private fun renderHome(body: LinearLayout,focusNav: Boolean,focusType: Boolean,loading: Boolean,focusSection: Boolean=false) {
         homeUpdateCount=library.updatedFavorites()
         val preview=SeriesPreview(this); selectionPreview=preview; body.addView(preview)
-        val top=if(inlineHomeFilters()) nav[TAB_HOME] else typeButtons.getValue(library.contentType)
+        val top: View=typeButtons.getValue(library.contentType)
         val home=HomeScreen(this,top,::loadCover,{ item,label -> preview.show(item,if(label.startsWith("第 ")) selectionStatus(item) else listOf(label,selectionStatus(item)).filter { it.isNotBlank() }.joinToString(" · ")) },
             { item,resume -> openDetail(item,resume) },::quickActions,{ catalogFocus=it })
         homeScreen=home; body.addView(home,lp(-1,0).apply { weight=1f })
         val hot=catalog.filterNot { it.id in library.hidden() }
-        home.render(homeShelves(),catalogFocus,!focusNav && !focusType,
+        home.render(homeShelves(),catalogFocus,!focusNav && !focusType && !focusSection,
             if(hasMore) { { page=2; catalogFocus=""; showCatalog(true) } } else null,homePosition)
         home.refresh.text=if(loading) if(homeFromCache) "已显示上次内容 · 正在更新热门…" else "正在更新热门…" else "刷新热门"
         home.refresh.setOnClickListener { showCatalog(true) }
         typeButtons.values.forEach { it.nextFocusDownId=home.firstId() }
-        if(inlineHomeFilters()) nav.forEach { it.nextFocusDownId=home.firstId() }
-        if(focusNav) nav[TAB_HOME].requestFocus() else if(focusType) typeButtons.getValue(library.contentType).requestFocus()
+        wireSections()
+        if(focusSection) sectionButtons[tab]?.requestFocus()
+        else if(focusNav) nav[TAB_HOME].requestFocus() else if(focusType) typeButtons.getValue(library.contentType).requestFocus()
         if(hot.isNotEmpty() && !homeContentLogged) {
             homeContentLogged=true
             body.post { android.util.Log.i("HongguoTV","Home content ready cached=$homeFromCache elapsedMs=${android.os.SystemClock.elapsedRealtime()-activityStarted}") }
@@ -1232,7 +1310,7 @@ class MainActivity: Activity() {
             if(screen=="player" && ::playbackText.isInitialized) showHud()
         })
     }
-    /** 详情已经拿到：从上次的位置开播；预取的第一集对得上就直接用，省掉播放接口和首屏缓冲。 */
+    /** 详情已经拿到：从上次的位置开播；预取的那一集对得上就直接用，省掉播放接口和首屏缓冲。 */
     private fun startFeedEpisode(series: Series,data: Detail,ready: FeedReady?) {
         detail=data; library.observeFavorite(series.id,data.episodes.size,System.currentTimeMillis(),acknowledge=true)
         val progress=library.progress(series.id)
@@ -1386,6 +1464,7 @@ class MainActivity: Activity() {
             main.removeCallbacks(hideHud); main.removeCallbacks(seekRunnable); pendingSeek=null
         } else releasePlayer()
         artwork.cancelPage(clearMemory=true)
+        backdropCover="" // cancelPage 会把封面底一起解绑，切集/切片后要重新加载
         playbackHttp=claimedHttp; video=prefetched
         var firstReady=true; var firstFrame=true
         if(!recovering) recovery.reset()
@@ -1398,6 +1477,9 @@ class MainActivity: Activity() {
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         if(!reuse) {
             root.removeAllViews(); root.setBackgroundColor(Color.BLACK)
+            backdropCover=""
+            val cover=coverBackdrop()
+            backdrop=cover; root.addView(cover,FrameLayout.LayoutParams(-1,-1))
             val view=PlayerView(this).apply {
                 useController=false; resizeMode=frameResizeMode(); isFocusable=false
                 setKeepContentOnPlayerReset(true); setShutterBackgroundColor(Color.BLACK); setShowBuffering(PlayerView.SHOW_BUFFERING_ALWAYS)
@@ -1456,6 +1538,13 @@ class MainActivity: Activity() {
                         else if(foreground && requestedAutoplay && !pausedForLifecycle && library.autoNext && feedMode) switchFeed(1)
                         else { requestedAutoplay=false; p.pause(); playbackText.text="本集已结束"; showPanel() }
                     }
+                }
+                override fun onVideoSizeChanged(videoSize: VideoSize) {
+                    if(!active() || videoSize.height<=0) return
+                    val ratio=videoSize.width*videoSize.pixelWidthHeightRatio/videoSize.height
+                    val aspect=if(videoSize.unappliedRotationDegrees%180==0) ratio else 1f/ratio
+                    android.util.Log.i("HongguoTV","Video size ${videoSize.width}x${videoSize.height} aspect=$aspect")
+                    applyVideoFrame(aspect)
                 }
                 override fun onRenderedFirstFrame() {
                     if(active() && firstFrame) {
@@ -1609,16 +1698,16 @@ class MainActivity: Activity() {
         val data=detail ?: return
         if(!feedTopReady) return
         feedTop.removeAllViews(); nav.clear(); buildNav(feedTop,false)
-        val info=column().apply { setPadding(dp(widthDp()*.05f),dp(6),0,dp(14)) }
-        info.addView(text("第 ${episodeIndex+1} 集",13f,bg).apply { setPadding(dp(11),dp(5),dp(11),dp(5)); background=rounded(accent) })
+        val info=column().apply { setPadding(dp(widthDp()*.05f),dp(6),dp(24),dp(14)) }
+        info.addView(text("第 ${episodeIndex+1} 集",13f,bg).apply { setPadding(dp(11),dp(5),dp(11),dp(5)); background=rounded(accent) },lp(-2,-2))
         info.addView(text(data.series.title,25f).apply { setTypeface(null,Typeface.BOLD); maxLines=1; ellipsize=TextUtils.TruncateAt.END; setPadding(0,dp(9),0,0) })
         val meta=mutableListOf("第 ${episodeIndex+1} 集","共 ${data.episodes.size} 集")
         if(data.series.badge.isNotBlank()) meta+=data.series.badge
         info.addView(text(meta.joinToString("  ·  "),13f,muted).apply { setPadding(0,dp(7),0,0) })
         val tags=feedTagText(data.series.tags)
         if(tags.isNotBlank()) info.addView(text(tags,13f,accent).apply { maxLines=1; ellipsize=TextUtils.TruncateAt.END; setPadding(0,dp(7),0,0) })
-        if(data.series.description.isNotBlank()) info.addView(text(data.series.description,14f,muted).apply { maxLines=2; ellipsize=TextUtils.TruncateAt.END; setPadding(0,dp(7),dp(24),0) },lp(dp(widthDp()*.58f),-2))
-        feedTop.addView(info)
+        if(data.series.description.isNotBlank()) info.addView(text(data.series.description,14f,muted).apply { maxLines=2; ellipsize=TextUtils.TruncateAt.END; setPadding(0,dp(7),0,0) })
+        feedTop.addView(info,lp(feedInfoWidth(),-2))
         buildFeedActions(data)
         if(panel) nav.getOrNull(TAB_RECOMMEND)?.requestFocus()
     }
@@ -1744,9 +1833,50 @@ class MainActivity: Activity() {
         VideoFrameMode.ZOOM -> androidx.media3.ui.AspectRatioFrameLayout.RESIZE_MODE_ZOOM
         VideoFrameMode.FILL -> androidx.media3.ui.AspectRatioFrameLayout.RESIZE_MODE_FILL
     }
+    /** 竖屏视频两侧铺封面：放大后模糊并压暗，替代大片黑边。 */
+    private fun coverBackdrop()=ImageView(this).apply {
+        visibility=View.GONE
+        scaleType=ImageView.ScaleType.CENTER_CROP
+        alpha=.42f
+        // Android 12 起直接交给 GPU 做高斯模糊；更低版本靠小图放大已经足够柔和。
+        if(android.os.Build.VERSION.SDK_INT>=31) setRenderEffect(android.graphics.RenderEffect.createBlurEffect(60f,60f,android.graphics.Shader.TileMode.CLAMP))
+    }
+    /**
+     * 竖屏视频按原始比例收窄播放器并居中，两侧交给模糊封面；
+     * 横屏或「等比铺满」「拉伸铺满」时保持整屏，横屏本来就没有黑边。
+     */
+    private fun applyVideoFrame(aspect: Float=videoAspect) {
+        if(aspect<=0f) return
+        videoAspect=aspect
+        val portrait=aspect<1f && library.frameMode==VideoFrameMode.FIT
+        // 菜单打开时不重建浮层，免得把焦点从操作行抢回导航。
+        if(portrait!=feedPortrait) { feedPortrait=portrait; if(feedMode && feedTopReady && !panel) renderFeedChrome() }
+        val view=playerView ?: return
+        val metrics=resources.displayMetrics
+        if(!portrait) {
+            view.layoutParams=FrameLayout.LayoutParams(-1,-1)
+            backdrop?.visibility=View.GONE
+            return
+        }
+        view.layoutParams=FrameLayout.LayoutParams((metrics.heightPixels*aspect).roundToInt().coerceIn(dp(120),metrics.widthPixels),metrics.heightPixels,Gravity.CENTER)
+        val cover=backdrop ?: return
+        val url=detail?.series?.cover.orEmpty()
+        if(url!=backdropCover) {
+            backdropCover=url
+            if(url.isBlank()) cover.setImageDrawable(null) else artwork.load(cover,url,ArtworkLoader.PRIORITY_VISIBLE,dp(200),dp(200))
+        }
+        cover.visibility=View.VISIBLE
+    }
+    /** 竖屏时信息区只占左侧模糊封面那一条，不压到画面上。 */
+    private fun feedInfoWidth(): Int {
+        val metrics=resources.displayMetrics
+        if(!feedPortrait) return dp(widthDp()*.58f)
+        val videoWidth=(metrics.heightPixels*videoAspect).roundToInt().coerceAtMost(metrics.widthPixels)
+        return (metrics.widthPixels-videoWidth).coerceAtLeast(dp(200))
+    }
     private fun showFramePicker(anchor: TextView,inPlayer: Boolean) {
         tvTools.choose("全局画面模式",listOf("完整画面 · 保留比例与全部内容","等比铺满 · 会裁掉部分画面与字幕","拉伸铺满 · 画面比例会改变"),anchor,{ index ->
-            library.frameMode=VideoFrameMode.entries[index]; playerView?.resizeMode=frameResizeMode()
+            library.frameMode=VideoFrameMode.entries[index]; playerView?.resizeMode=frameResizeMode(); applyVideoFrame()
             if(anchor.tag!="playback-settings") anchor.text=(if(inPlayer) "画面 " else "画面模式  ·  ")+library.frameMode.label
         })
     }
@@ -1855,6 +1985,7 @@ class MainActivity: Activity() {
         main.removeCallbacks(hideHud); main.removeCallbacks(seekRunnable); pendingSeek=null
         playerListener?.let { player?.removeListener(it) }; playerListener=null
         video?.close(); video=null; playerView?.player=null; playerView=null; player?.release(); player=null; playbackReady=false; transportPlay=null; sleepButton=null
+        backdrop=null; backdropCover=""; videoAspect=0f; feedPortrait=false
         closeTransport(playbackHttp); playbackHttp=null
         window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
     }
@@ -1867,7 +1998,12 @@ class MainActivity: Activity() {
         when(screen) {
             "player" -> if(feedMode) feedBack() else if(hud.visibility==View.VISIBLE && !playError) hidePlaybackOverlay() else returnToDetail()
             "detail" -> showCatalog()
-            else -> if(collection!=null) { leaveCollection(); showCatalog() } else if(nav.any { it.hasFocus() }) { if(tab!=TAB_HOME) { switchTab(TAB_HOME); nav[TAB_HOME].requestFocus() } else finish() } else nav.getOrNull(tab)?.requestFocus()
+            else -> when {
+                collection!=null -> { leaveCollection(); showCatalog() }
+                sectionButtons.values.any { it.hasFocus() } -> nav.getOrNull(tab)?.requestFocus()
+                nav.any { it.hasFocus() } -> if(tab!=TAB_HOME) { switchTab(TAB_HOME); nav.getOrNull(TAB_HOME)?.requestFocus() } else finish()
+                else -> nav.getOrNull(tab)?.requestFocus()
+            }
         }
     }
     /**

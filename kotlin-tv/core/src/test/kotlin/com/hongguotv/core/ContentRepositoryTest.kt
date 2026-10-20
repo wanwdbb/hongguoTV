@@ -223,7 +223,32 @@ class ContentRepositoryTest {
         assertEquals("comic-cursor",requests[1].url.queryParameter("passback"))
         assertEquals("25",requests[1].url.queryParameter("offset"))
         assertThrows(SearchSessionExpiredException::class.java) { repo.search("重生",2,ContentType.COMIC) }
+        assertEquals(3,requests.size)
+    }
+
+    @Test fun firstSearchPageMergesSecondBatchSoResultsAreNotTooFew() {
+        val requests=mutableListOf<Request>()
+        val repo=repository { request ->
+            requests+=request
+            if(requests.size==1) JSONObject().put("code",0).put("search_tabs",JSONArray().put(JSONObject()
+                .put("tab_type",19).put("has_more",true).put("search_id","session").put("passback","6").put("next_offset",6)
+                .put("data",JSONArray().put(JSONObject().put("video_data",JSONArray().put(JSONObject()
+                    .put("series_id","101").put("title","第一页").put("episode_cnt",8))))))).toString()
+            else JSONObject().put("code",0).put("search_tabs",JSONArray().put(JSONObject()
+                .put("tab_type",19).put("has_more",false)
+                .put("data",JSONArray().put(JSONObject().put("video_data",JSONArray().put(JSONObject()
+                    .put("series_id","202").put("title","第二页").put("episode_cnt",8))))))).toString()
+        }
+        val page=repo.search("修仙",1,ContentType.COMIC)
+        assertEquals(listOf("101","202"),page.items.map { it.id })
+        assertFalse(page.hasMore)
         assertEquals(2,requests.size)
+        // 第二页请求用第一页返回的游标，而不是凭空算出的 offset。
+        assertEquals("6",requests[1].url.queryParameter("offset"))
+        assertEquals("6",requests[1].url.queryParameter("passback"))
+        assertEquals("session",requests[1].url.queryParameter("search_id"))
+        assertEquals("0",requests[0].url.queryParameter("offset"))
+        assertEquals("true",requests[0].url.queryParameter("is_first_enter_search"))
     }
 
     @Test fun expiredCursorRequestsFreshSearchInsteadOfDuplicateOffsetPage() {
@@ -237,10 +262,10 @@ class ContentRepositoryTest {
         repo.search("修仙",1,ContentType.COMIC)
         now=300001L
         assertThrows(SearchSessionExpiredException::class.java) { repo.search("修仙",2,ContentType.COMIC) }
-        assertEquals(1,requests)
+        assertEquals(2,requests)
         repo.search("修仙",1,ContentType.COMIC)
         repo.search("修仙",2,ContentType.COMIC)
-        assertEquals(3,requests)
+        assertEquals(5,requests)
     }
 
     @Test fun shortHomeStillUsesCategoryAndStopsOnLastPage() {
@@ -337,5 +362,41 @@ class ContentRepositoryTest {
         }
         assertEquals("456",repo.search("短剧",1,ContentType.SHORT).items.single().id)
         assertEquals(2,paths.size)
+    }
+
+    @Test fun unregisteredDeviceEmptySearchFallsBackToWebsiteForShortDramas() {
+        val paths=mutableListOf<String>()
+        val repo=repository { request ->
+            paths+=request.url.encodedPath
+            if(request.url.host.endsWith("fqnovel.com")) "" else
+                """<script>_ROUTER_DATA={"loaderData":{"search_page":{"searchList":[{"series_id":"456","series_name":"测试短剧"}]}}}};</script>"""
+        }
+        assertEquals("456",repo.search("短剧",1,ContentType.SHORT).items.single().id)
+        assertEquals(2,paths.size)
+    }
+
+    @Test fun unregisteredDeviceEmptyComicSearchReportsFriendlyError() {
+        var requests=0
+        val repo=repository { requests++; "" }
+        val error=assertThrows(IOException::class.java) { repo.search("修仙",1,ContentType.COMIC) }
+        assertEquals("搜索接口暂不可用",error.message)
+        assertEquals(1,requests)
+    }
+
+    @Test fun deviceIdentityAcceptsOnlyNumericRegistrationResults() {
+        assertFalse(DeviceIdentity.registered)
+        assertFalse(DeviceIdentity.apply("install","123456"))
+        assertFalse(DeviceIdentity.apply("123456","device"))
+        val install=DeviceIdentity.installId; val device=DeviceIdentity.deviceId
+        try {
+            assertTrue(DeviceIdentity.apply(" 1234567 "," 7654321 "))
+            assertEquals("1234567",DeviceIdentity.installId)
+            assertEquals("7654321",DeviceIdentity.deviceId)
+        } finally {
+            // 单例是进程级的，恢复现场避免影响签名固定值等其它测试。
+            DeviceIdentity.apply(install,device)
+        }
+        assertEquals(install,DeviceIdentity.installId)
+        assertEquals(device,DeviceIdentity.deviceId)
     }
 }

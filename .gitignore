@@ -28,6 +28,7 @@ keystore.properties
 /captures/
 /downloads/
 /tmp/
+*.syn
 
 # Delivery artifacts, native intermediates, local runtime
 /outputs/

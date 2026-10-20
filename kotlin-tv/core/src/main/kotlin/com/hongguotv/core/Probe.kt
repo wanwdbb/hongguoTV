@@ -80,6 +80,37 @@ fun main(args: Array<String>) {
         }
         return
     }
+    if(args.contains("--register")) {
+        try {
+            val registration=repository.registerDevice()
+            val applied=DeviceIdentity.apply(registration.installId,registration.deviceId)
+            println("device_id=${registration.deviceId}; install_id=${registration.installId}; applied=$applied")
+        } finally {
+            repository.http.connectionPool.evictAll(); repository.http.dispatcher.executorService.shutdown()
+        }
+        return
+    }
+    if(args.contains("--search")) {
+        // 搜索分页探针：看每页条数、翻页是否有重复/漏项，方便判断接口一次能给多少。
+        val keyword=args.firstOrNull { !it.startsWith("--") } ?: "总裁"
+        println("identity registered=${DeviceIdentity.registered} device_id=${DeviceIdentity.deviceId} install_id=${DeviceIdentity.installId}")
+        try {
+            for(type in ContentType.entries) {
+                val seen=mutableSetOf<String>(); val counts=mutableListOf<Int>()
+                for(pageNumber in 1..4) {
+                    val page=runCatching { repository.search(keyword,pageNumber,type) }.onFailure { println("type=${type.label} page=$pageNumber failed=${it.message}") }.getOrNull() ?: break
+                    val fresh=page.items.count { it.id !in seen }
+                    counts+=page.items.size; seen+=page.items.map { it.id }
+                    println("type=${type.label} page=$pageNumber items=${page.items.size} fresh=$fresh hasMore=${page.hasMore} first=${page.items.firstOrNull()?.title ?: "-"}")
+                    if(!page.hasMore) break
+                }
+                println("type=${type.label} unique=${seen.size} perPage=$counts")
+            }
+        } finally {
+            repository.http.connectionPool.evictAll(); repository.http.dispatcher.executorService.shutdown()
+        }
+        return
+    }
     val type=if(args.contains("--comic")) ContentType.COMIC else ContentType.SHORT
     val keyword=if(type==ContentType.COMIC) "修仙" else "总裁"
     val search=repository.search(keyword,type=type); println("search=${search.items.size}; hasMore=${search.hasMore}")

@@ -664,8 +664,10 @@ class MainActivity: Activity() {
             item.setOnFocusChangeListener { _,focused ->
                 paint(focused)
                 // 焦点移到别的入口就切过去（推荐是播放页，仍然只按确认进）；按下键自然落到新页的分栏。
-                if(focused && screen=="catalog" && target!=tab && group.tabs.first()!=TAB_RECOMMEND) {
-                    main.post { if(screen=="catalog" && target!=tab && item.hasFocus()) switchTab(target,keepNav=true) }
+                // 推荐连播的浮层导航也在 player 页，必须允许从浮层直接切走，否则遥控器左右只能移动焦点。
+                val canSwitch=screen=="catalog" || (screen=="player" && feedMode)
+                if(focused && canSwitch && target!=tab && group.tabs.first()!=TAB_RECOMMEND) {
+                    main.post { if((screen=="catalog" || (screen=="player" && feedMode)) && target!=tab && item.hasFocus()) switchTab(target,keepNav=true) }
                 }
             }
             item

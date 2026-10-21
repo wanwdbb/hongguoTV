@@ -15,6 +15,9 @@ internal fun JSONObject.str(key: String) = if (isNull(key)) "" else optString(ke
 /** App 搜索接口：未注册设备会被风控挡下（HTTP 200 空响应），见 [ContentRepository.registerDevice]。 */
 private const val SEARCH_API = "https://api5-normal-sinfonlinea.fqnovel.com/reading/bookapi/search/tab/v"
 private const val REGISTER_API = "https://log5-applog.fqnovel.com/service/2/device_register/"
+private const val COMMENT_API = "https://api5-normal-sinfonlineb.fqnovel.com/novel/commentapi/comment/list"
+const val DANMAKU_WINDOW = 30_000L
+const val DANMAKU_MAX_DURATION = 86_400_000L
 /** 官方搜索第一页只给 6 条（「综合」页），首页拼两页补足一屏。 */
 private const val FIRST_PAGE_BATCHES = 2
 internal fun cleanUrl(s: String) = s.replace("\\/","/").replace("\\u002F","/",ignoreCase=true).replace("\\u0026","&").replace("&amp;","&")
@@ -260,6 +263,62 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
         val key=item.str("spade_a").takeIf { it.isNotEmpty() }?.let(MediaCrypto::deriveKey)
         val quality=if(selected.first>0) "${selected.first}P"+(if(selected.first>maxQuality) "（兼容资源）" else "") else "自动"
         return StreamInfo(url,key,quality)
+    }
+    /**
+     * 弹幕：官方弹幕接口按时间段返回，`startMs` 用 30 秒对齐，`durationMs` 是本集总时长。
+     * 返回的 [DanmakuPage.nextMs] 是下一个时间段的起点；接口对未注册设备会返回空，按失败处理。
+     */
+    fun danmaku(videoId: String, seriesId: String, startMs: Long, durationMs: Long): DanmakuPage {
+        require(videoId.matches(Regex("[0-9]{1,30}")) && seriesId.matches(Regex("[0-9]{1,30}")))
+        require(startMs>=0 && durationMs>startMs && durationMs<=DANMAKU_MAX_DURATION)
+        val values=linkedMapOf(
+            "aid" to "8662","app_name" to "novelread","channel" to "update_64",
+            "device_platform" to "android","manifest_version_code" to "73532",
+            "update_version_code" to "73532","version_code" to "73532","version_name" to "7.3.5.32"
+        )
+        val body=JSONObject()
+            .put("comment_source",601).put("server_channel",1000).put("group_id",videoId).put("group_type",30)
+            .put("comment_type",20).put("sort",1).put("count",90).put("cursor","").put("aid",8662).put("compliance_status",0)
+            .put("business_param",JSONObject().put("book_id",seriesId).put("start_offset_time",startMs)
+                .put("playlet_item_duration",durationMs).put("need_danmaku_guide_type",JSONArray().put(1).put(3).put(4).put(2)))
+            .toString()
+        val signed=signer.sign("$COMMENT_API/$videoId/v1/",values,body.toByteArray(Charsets.UTF_8))
+        val raw=text(signed.url,signed)
+        if(raw.isBlank()) throw IOException("弹幕接口暂不可用")
+        val root=runCatching { JSONObject(raw) }.getOrElse { throw IOException("弹幕接口暂不可用") }
+        val code=if(root.has("code")) root.optInt("code",0) else root.optInt("Code",0)
+        if(code!=0) throw IOException("弹幕接口暂不可用")
+        return parseDanmaku(root,videoId,startMs,durationMs)
+    }
+    private fun parseDanmaku(root: JSONObject, videoId: String, startMs: Long, durationMs: Long): DanmakuPage {
+        val data=root.optJSONObject("data") ?: throw IOException("本集暂无弹幕")
+        val next=data.optJSONObject("extra")?.opt("next_query_danmaku_list_time")?.toString()?.toLongOrNull()
+            ?: throw IOException("弹幕时间段无效")
+        if(next<=startMs) throw IOException("弹幕时间段无效")
+        val end=minOf(next,durationMs)
+        val total=runCatching {
+            JSONObject(data.optJSONObject("common_list_info")?.str("cursor").orEmpty()).optInt("danmaku_count",0)
+        }.getOrDefault(0)
+        val rows=data.optJSONArray("data_list") ?: JSONArray()
+        val seen=mutableSetOf<String>(); val items=mutableListOf<DanmakuComment>()
+        for(row in rows.objects()) {
+            val comment=row.optJSONObject("comment") ?: continue
+            val common=comment.optJSONObject("common") ?: continue
+            if(common.str("group_id")!=videoId || common.str("status")!="1") continue
+            val position=comment.optJSONObject("expand")?.str("offset_time")?.toLongOrNull() ?: continue
+            val id=comment.str("comment_id"); if(id.isEmpty() || id.length>120 || !seen.add(id)) continue
+            val text=danmakuText(common.optJSONObject("content")?.str("text").orEmpty())
+            if(text.isEmpty() || position<startMs || position>=end) continue
+            items+=DanmakuComment(id,text,position)
+            if(items.size==90) break
+        }
+        items.sortBy { it.timeMs }
+        return DanmakuPage(items,startMs,end,total)
+    }
+    private fun danmakuText(raw: String): String {
+        val clean=raw.filter { it.code>=32 && it!='\u2028' && it!='\u2029' }.replace(Regex("\\s+")," ").trim()
+        val mapped=danmakuFaceText(clean)
+        return if(mapped.length>180) mapped.take(180)+"…" else mapped
     }
     companion object {
         fun extractRouter(html: String): JSONObject {

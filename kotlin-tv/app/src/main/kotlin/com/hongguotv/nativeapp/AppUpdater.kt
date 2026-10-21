@@ -6,6 +6,7 @@ import android.app.AlertDialog
 import android.content.ClipData
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.ConnectivityManager
 import android.net.Uri
 import android.os.Build
 import android.os.Handler
@@ -47,6 +48,7 @@ class AppUpdater(private val activity: Activity, private val idle: () -> Boolean
     private var retryAfter = 0L
     private var promptedCode = 0L
     private val auto get() = preferences.getBoolean("automatic", true)
+    private val wifiOnly get() = preferences.getBoolean("wifi_only", true)
     private val poll = object : Runnable {
         override fun run() {
             if (!active) return
@@ -56,7 +58,8 @@ class AppUpdater(private val activity: Activity, private val idle: () -> Boolean
                 val update = available
                 when {
                     ready && update != null && promptedCode != update.versionCode && !deferred(update) -> { promptedCode = update.versionCode; show(activity.currentFocus) }
-                    update != null && !ready && now >= retryAfter -> download(false)
+                    update != null && !ready && now >= retryAfter && !skipped(update) && autoDownloadAllowed() -> download(false)
+                    update != null && !ready && now >= retryAfter && !skipped(update) && promptedCode != update.versionCode -> { promptedCode = update.versionCode; show(activity.currentFocus) }
                     now < last || now - last >= 6 * 60 * 60 * 1000L -> check(false)
                 }
             }
@@ -84,12 +87,36 @@ class AppUpdater(private val activity: Activity, private val idle: () -> Boolean
         Thread({ repository.close() }, "hongguotv-update-cleanup").start()
     }
     private fun updateStatus(text: String) { status = text; statusView?.text = text }
-    private fun deferred(update: AppUpdate) = preferences.getLong("deferred_code", 0) == update.versionCode && preferences.getLong("deferred_until", 0) > System.currentTimeMillis()
+    private fun deferred(update: AppUpdate) = (preferences.getLong("deferred_code", 0) == update.versionCode && preferences.getLong("deferred_until", 0) > System.currentTimeMillis()) || skipped(update)
+    /** 「跳过此版」只对当前 versionCode 生效，下个版本会重新提示。 */
+    private fun skipped(update: AppUpdate) = preferences.getLong("skipped_code", 0) == update.versionCode
+    private fun metered(): Boolean {
+        val manager = activity.getSystemService(ConnectivityManager::class.java) ?: return false
+        return runCatching { manager.isActiveNetworkMetered }.getOrDefault(false)
+    }
+    private fun autoDownloadAllowed() = !wifiOnly || !metered()
+    /** README 生成的说明带 markdown 列表和加粗，电视上按纯文本排一下更好读。 */
+    private fun prettyNotes(notes: String): String = notes.lineSequence().joinToString("\n") { line ->
+        val text = line.trim()
+        when {
+            text.startsWith("## ") -> text.removePrefix("## ").trim()
+            text.startsWith("### ") -> text.removePrefix("### ").trim()
+            text.startsWith("#### ") -> text.removePrefix("#### ").trim()
+            text.startsWith("- ") || text.startsWith("* ") -> "• " + text.drop(2).replace("**", "")
+            else -> text.replace("**", "")
+        }
+    }.trim()
     private fun renderActions() {
         dialog?.getButton(AlertDialog.BUTTON_POSITIVE)?.apply {
             text = when { busy -> "处理中…"; ready -> "安装新版"; available != null -> "下载新版"; else -> "检查更新" }
             // Keep D-pad focus stable while the request runs; action methods reject duplicates.
             isEnabled = true
+        }
+        // 只有发现新版时才显示「跳过此版」；已经跳过时按钮改为「取消跳过」。
+        val update=available
+        dialog?.getButton(AlertDialog.BUTTON_NEUTRAL)?.apply {
+            visibility = if (update != null) View.VISIBLE else View.GONE
+            text = if (update != null && skipped(update)) "取消跳过" else "跳过此版"
         }
     }
     fun show(from: View?) {
@@ -107,12 +134,16 @@ class AppUpdater(private val activity: Activity, private val idle: () -> Boolean
                 if (!enabled && busy) { interrupt(); updateStatus("自动更新已关闭，可手动检查"); renderActions() }
             }
         })
+        body.addView(CheckBox(activity).apply {
+            text = "仅在 Wi-Fi / 非计费网络自动下载"; isChecked = wifiOnly
+            setOnCheckedChangeListener { _, enabled -> preferences.edit().putBoolean("wifi_only", enabled).apply() }
+        })
         body.addView(TextView(activity).apply {
-            text = "只在应用前台浏览时检查，播放中不打扰。GitHub 直连超时会自动改用加速线路，下载后需确认系统安装，收藏与观看记录保留。"; textSize = 13f; setTextColor(TvStyle.muted)
+            text = "只在应用前台浏览时检查，播放中不打扰。自动下载默认只在 Wi-Fi 等非计费网络进行；GitHub 直连超时会自动改用加速线路，下载后需确认系统安装，收藏与观看记录保留。"; textSize = 13f; setTextColor(TvStyle.muted)
             setPadding(0, (8*dp).toInt(), 0, (8*dp).toInt())
         })
         val next = AlertDialog.Builder(activity).setTitle("版本与更新 · ${BuildConfig.VERSION_NAME}").setView(ScrollView(activity).apply { addView(body) })
-            .setNegativeButton("稍后", null).setPositiveButton("检查更新", null).create()
+            .setNegativeButton("稍后", null).setNeutralButton("跳过此版", null).setPositiveButton("检查更新", null).create()
         dialog = next
         next.setOnDismissListener {
             if (dialog === next) { dialog = null; statusView = null }
@@ -122,6 +153,18 @@ class AppUpdater(private val activity: Activity, private val idle: () -> Boolean
         next.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener { when { ready -> install(); available != null -> download(true); else -> check(true) } }
         next.getButton(AlertDialog.BUTTON_NEGATIVE).setOnClickListener {
             available?.let { preferences.edit().putLong("deferred_code", it.versionCode).putLong("deferred_until", System.currentTimeMillis()+24*60*60*1000L).apply() }
+            next.dismiss()
+        }
+        next.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener {
+            available?.let { update ->
+                if (skipped(update)) {
+                    preferences.edit().remove("skipped_code").apply()
+                    updateStatus("已取消跳过 ${update.versionName}，可继续下载")
+                } else {
+                    preferences.edit().putLong("skipped_code", update.versionCode).apply()
+                    updateStatus("已跳过 ${update.versionName}，下个版本会再提示；仍可在本页手动下载")
+                }
+            }
             next.dismiss()
         }
         renderActions()
@@ -151,8 +194,14 @@ class AppUpdater(private val activity: Activity, private val idle: () -> Boolean
                 updateStatus(if (update.versionCode > BuildConfig.VERSION_CODE && update.minSdk > Build.VERSION.SDK_INT) "新版需要 Android API ${update.minSdk}，当前电视继续使用本版" else "已是最新版本 ${BuildConfig.VERSION_NAME}")
                 worker.execute { apk.delete() }
             } else {
-                updateStatus("发现 ${update.versionName} · ${"%.1f".format(update.size/1048576.0)} MB\n${update.notes}")
-                if (manual || auto) download(manual)
+                val notes = prettyNotes(update.notes)
+                updateStatus("发现 ${update.versionName} · ${"%.1f".format(update.size/1048576.0)} MB\n$notes")
+                when {
+                    manual -> download(true)
+                    skipped(update) -> updateStatus("已跳过 ${update.versionName}，下个版本会再提示；可在本页手动下载\n$notes")
+                    !autoDownloadAllowed() -> updateStatus("发现 ${update.versionName} · ${"%.1f".format(update.size/1048576.0)} MB\n当前为计费网络，已暂停自动下载；按「下载新版」继续。\n$notes")
+                    auto -> download(false)
+                }
             }
         }
     }
@@ -165,7 +214,7 @@ class AppUpdater(private val activity: Activity, private val idle: () -> Boolean
             repository.download(update, apk) { percent -> main.post { if (generation == ticket && active) updateStatus("正在下载 ${update.versionName} · $percent%") } }
             validateApk(update)
         }) {
-            ready = true; updateStatus("${update.versionName} 已下载并校验\n${update.notes}\n\n确认后由系统覆盖安装，保留本机记录。")
+            ready = true; updateStatus("${update.versionName} 已下载并校验\n${prettyNotes(update.notes)}\n\n确认后由系统覆盖安装，保留本机记录。")
             if (idle() && dialog == null && (manual || !deferred(update))) { promptedCode = update.versionCode; show(activity.currentFocus) }
         }
     }

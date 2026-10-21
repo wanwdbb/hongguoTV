@@ -132,6 +132,29 @@ class MainActivity: Activity() {
     private var videoAspect=0f
     /** 是否为竖屏画面（决定推荐信息区宽度与封面底）。 */
     private var feedPortrait=false
+    /** 弹幕层、开关，以及本次播放已经取到的时间段。 */
+    private var danmakuView: DanmakuView?=null
+    private var danmakuButton: TextView?=null
+    private val danmakuPrefs by lazy { getSharedPreferences("native-player-v1",Context.MODE_PRIVATE) }
+    private var danmakuEnabled=true
+    private var danmakuSeriesId=""
+    private var danmakuVideoId=""
+    private var danmakuCacheVideo=""
+    private var danmakuLoadedUntil=0L
+    private var danmakuLoading=false
+    private var danmakuFailedAt=0L
+    private val danmakuItems=mutableListOf<DanmakuComment>()
+    /** 本集已经取过的 30 秒段，拖动回看时直接复用，不再重复请求。 */
+    private val danmakuCache=DanmakuCache()
+    /** 弹幕显示偏好：字号档位 / 不透明度 / 速度档位（下标，见 danmakuSizeValues 等）。 */
+    private var danmakuSize=1
+    private var danmakuAlpha=100
+    private var danmakuSpeed=1
+    private var danmakuLines=1
+    /** 自动降清晰度只对当前这一集生效；key 为「剧集ID:集下标」。 */
+    private var qualityCap: Int?=null
+    private var qualityCapKey=""
+    private var autoFallbackTried=false
     private lateinit var favoriteMonitor: FavoriteMonitor
     private val favoriteBadges=mutableMapOf<String,TextView>()
     private var favoriteStatus: TextView?=null
@@ -296,6 +319,11 @@ class MainActivity: Activity() {
         mediaSession=TvMediaSession(this,{ if(foreground && screen=="player") requestPlayback(true) },{ if(foreground && screen=="player") requestPlayback(false) },{ position -> if(foreground && screen=="player") seekTo(position) },{ direction -> skipEpisode(direction) },{ if(foreground && screen=="player") returnToDetail() })
         message(base(),"正在读取本机记录…")
         restoreCategory(); restoreRankBoard(); restoreRecommend()
+        danmakuEnabled=danmakuPrefs.getBoolean("danmaku",true)
+        danmakuSize=danmakuPrefs.getInt("danmakuSize",1).coerceIn(0,2)
+        danmakuAlpha=danmakuPrefs.getInt("danmakuAlpha",100).let { if(it in listOf(60,80,100)) it else 100 }
+        danmakuSpeed=danmakuPrefs.getInt("danmakuSpeed",1).coerceIn(0,2)
+        danmakuLines=danmakuPrefs.getInt("danmakuLines",1).coerceIn(0,2)
         DeviceIdentityStore.restore(this)
         DeviceIdentityStore.ensure(this,repository,io)
         loadLibrary()
@@ -962,7 +990,7 @@ class MainActivity: Activity() {
                 card.addView(badge,lp(-1,-2)); if(tab==TAB_FAVORITES) favoriteBadges[item.id]=badge
                 card.setOnClickListener { catalogFocus=item.id; openDetail(item,tab==TAB_HISTORY || collection=="resume" || collection=="updates") }
                 card.setOnLongClickListener { catalogFocus=item.id; quickActions(item,card); true }
-                card.setOnKeyListener { _,key,event -> if(key==KeyEvent.KEYCODE_MENU) { if(event.action==KeyEvent.ACTION_UP) { catalogFocus=item.id; quickActions(item,card) }; true } else false }
+                card.setOnKeyListener { _,key,event -> if(isMenuKey(key)) { if(event.action==KeyEvent.ACTION_UP) { catalogFocus=item.id; quickActions(item,card) }; true } else false }
                 card.setOnFocusChangeListener { _,focused -> card.background=TvStyle.card(this,focused); if(focused) { catalogFocus=item.id; loadCover(image,item.cover); preview.show(item,when { tab==TAB_RANK -> listOfNotNull(position?.rank?.let { "第 $it 名" },rankBadge).filter { it.isNotBlank() }.joinToString(" · "); recommendType!=null -> listOf(recommendType.label,selectionStatus(item)).filter { it.isNotBlank() }.joinToString(" · "); else -> selectionStatus(item) }); if(!restoringScroll) scroll.post { scroll.smoothScrollTo(0,when { line.top<scroll.scrollY -> line.top; line.bottom>scroll.scrollY+scroll.height -> (line.bottom-scroll.height).coerceAtLeast(0); else -> scroll.scrollY }) } } }
                 // The row measures its tallest card, then stretches siblings to keep badges aligned.
                 line.addView(card,lp(width,-1).apply { if(columnIndex<count-1) rightMargin=gap }); cards+=card
@@ -1178,6 +1206,8 @@ class MainActivity: Activity() {
             library.autoNext=!library.autoNext
             autoNextButton.text="自动连播  ·  ${if(library.autoNext) "开启" else "关闭"}"
         }
+        lateinit var danmakuSetting: TextView
+        danmakuSetting=setting(playback,"弹幕设置  ·  ${danmakuSummary()}") { showDanmakuSettings(danmakuSetting) }
         lateinit var backup: TextView
         backup=setting(device,"手机备份与恢复") {
             runCatching { LibraryBackup.encode(library.snapshot()) }.onSuccess { encoded ->
@@ -1202,7 +1232,7 @@ class MainActivity: Activity() {
         recommendModeButton=setting(recommend,"推荐模式  ·  ${recommendMode.label}") { showRecommendModePicker(recommendModeButton) }
         lateinit var resetInterest: TextView
         resetInterest=setting(recommend,"重置兴趣  ·  ${if(recommendResetAt>0) "已重置" else "未重置"}") { resetRecommendInterest(resetInterest) }
-        val left=listOf(qualityButton,defaultSpeed,frame,autoNextButton); val right=listOf(backup,hidden,updates,license)
+        val left=listOf(qualityButton,defaultSpeed,frame,autoNextButton,danmakuSetting); val right=listOf(backup,hidden,updates,license)
         val recommendColumn=listOf(recommendModeButton,resetInterest)
         val columns=listOf(left,right,recommendColumn)
         columns.forEach { items -> items.forEachIndexed { index,view ->
@@ -1210,8 +1240,8 @@ class MainActivity: Activity() {
             view.nextFocusDownId=items.getOrNull(index+1)?.id ?: view.id
         } }
         columns.forEachIndexed { columnIndex,items -> items.forEachIndexed { rowIndex,view ->
-            view.nextFocusLeftId=columns.getOrNull(columnIndex-1)?.getOrNull(rowIndex)?.id ?: view.id
-            view.nextFocusRightId=columns.getOrNull(columnIndex+1)?.getOrNull(rowIndex)?.id ?: view.id
+            view.nextFocusLeftId=columns.getOrNull(columnIndex-1)?.let { it.getOrNull(rowIndex) ?: it.lastOrNull() }?.id ?: view.id
+            view.nextFocusRightId=columns.getOrNull(columnIndex+1)?.let { it.getOrNull(rowIndex) ?: it.firstOrNull() }?.id ?: view.id
         } }
         nav.forEach { it.nextFocusDownId=qualityButton.id }
         parent.addView(text("红果 TV  /  ${BuildConfig.VERSION_NAME}    ·    收藏与进度保存在本机",12f,muted).apply { setPadding(dp(2),dp(18),0,dp(10)) })
@@ -1452,7 +1482,10 @@ class MainActivity: Activity() {
         val reuse=screen=="player" && player!=null && playerView!=null && !recovering && !playError
         library.setWatched(data.series.id,false)
         val selectedIndex=index.coerceIn(0,data.episodes.lastIndex)
-        val prefetched=ready?.remote ?: if(position==0L && !recovering) preparedNext.take("${data.episodes[selectedIndex]}:${library.maxQuality}") else null
+        val qualityKey="${data.series.id}:$selectedIndex"
+        if(qualityCapKey!=qualityKey) { qualityCap=null; autoFallbackTried=false }
+        val maxQuality=qualityCap ?: library.maxQuality
+        val prefetched=ready?.remote ?: if(position==0L && !recovering) preparedNext.take("${data.episodes[selectedIndex]}:$maxQuality") else null
         val claimedHttp=when { ready!=null -> ready.http; prefetched!=null -> prefetchHttp.also { prefetchHttp=null }; else -> null }
         if(saveCurrent) saveProgress(); library.flush(); invalidatePage(); favoriteMonitor.stop(); releaseCatalogViews()
         if(reuse) {
@@ -1485,6 +1518,12 @@ class MainActivity: Activity() {
                 setKeepContentOnPlayerReset(true); setShutterBackgroundColor(Color.BLACK); setShowBuffering(PlayerView.SHOW_BUFFERING_ALWAYS)
             }
             playerView=view; root.addView(view,FrameLayout.LayoutParams(-1,-1))
+            val layer=DanmakuView(this).apply {
+                positionProvider={ player?.currentPosition ?: 0L }
+                playingProvider={ player?.isPlaying==true }
+            }
+            applyDanmakuStyle(layer)
+            danmakuView=layer; root.addView(layer,FrameLayout.LayoutParams(-1,-1))
             if(feedMode) {
                 // 推荐连播的顶部浮层：导航与剧集信息，跟底部 hud 一起出现与收起。
                 feedTop=column().apply { background=GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM,intArrayOf(Color.argb(225,11,15,21),Color.argb(150,11,15,21),Color.TRANSPARENT)) }
@@ -1504,7 +1543,8 @@ class MainActivity: Activity() {
         playbackText.text="正在获取播放地址…"; progressBar.progress=0; progressBar.visibility=View.VISIBLE; hidePlaybackOverlay()
         if(feedMode) { renderFeedChrome(); showHud() } else { controls.removeAllViews(); controls.visibility=View.GONE; transportPlay=null; sleepButton=null }
         syncMediaSession()
-        val requestedId=data.episodes[episodeIndex]; val maxQuality=library.maxQuality; val ticket=generation
+        val requestedId=data.episodes[episodeIndex]; val ticket=generation
+        startDanmaku(requestedId,data.series.id)
         work({ prefetched ?: RemoteVideo(repository.http,repository.stream(requestedId,maxQuality)).prepare() }, { remote ->
             video=remote; quality=remote.info.quality
             val p=player ?: run {
@@ -1527,6 +1567,7 @@ class MainActivity: Activity() {
                             return
                         }
                         playbackReady=true
+                        main.removeCallbacks(danmakuTick); main.post(danmakuTick)
                         if(firstReady) { firstReady=false; readySince=android.os.SystemClock.elapsedRealtime(); android.util.Log.i("HongguoTV","Playback ready episode=${episodeIndex+1} preloaded=${prefetched!=null} reused=$reuse elapsedMs=${readySince-playbackStarted}") }
                         if(hud.visibility==View.VISIBLE) updatePlaybackText()
                     }
@@ -1554,7 +1595,7 @@ class MainActivity: Activity() {
                 }
                 override fun onIsPlayingChanged(playing: Boolean) { if(active()) { if(hud.visibility==View.VISIBLE) showHud(); syncMediaSession() } }
                 override fun onPlaybackParametersChanged(parameters: PlaybackParameters) { if(active()) syncMediaSession() }
-                override fun onPositionDiscontinuity(oldPosition: Player.PositionInfo,newPosition: Player.PositionInfo,reason: Int) { if(active()) syncMediaSession() }
+                override fun onPositionDiscontinuity(oldPosition: Player.PositionInfo,newPosition: Player.PositionInfo,reason: Int) { if(active()) { if(reason==Player.DISCONTINUITY_REASON_SEEK) resetDanmaku(); syncMediaSession() } }
                 override fun onPlayerError(error: PlaybackException) { if(active()) playerFailure(error) }
             }
             playerListener=listener; p.addListener(listener)
@@ -1662,13 +1703,25 @@ class MainActivity: Activity() {
     private fun playerFailure(problem: Throwable) {
         retryPosition=currentPosition().coerceAtLeast(0); retryAutoplay=requestedAutoplay && !sleepStopped
         saveProgress(); cancelRecovery(); cancelPrefetch()
-        playError=true; player?.pause(); progressBar.visibility=View.GONE; hud.visibility=View.VISIBLE; controls.removeAllViews(); controls.visibility=View.VISIBLE; panel=true
         val decoding=problem is PlaybackException && problem.errorCode in 3000..4999
+        // 解码不了 1080P 时先自动降到 720P 试一次；只影响当前这一集，不改全局默认清晰度。
+        val currentQuality=qualityCap ?: library.maxQuality
+        if(decoding && !autoFallbackTried && currentQuality>720) {
+            autoFallbackTried=true; qualityCap=720; qualityCapKey="${detail?.series?.id.orEmpty()}:$episodeIndex"
+            Toast.makeText(this,"当前清晰度无法解码，已自动改用 720P 重试",Toast.LENGTH_SHORT).show()
+            playEpisode(episodeIndex,retryPosition,retryAutoplay)
+            return
+        }
+        playError=true; player?.pause(); progressBar.visibility=View.GONE; hud.visibility=View.VISIBLE; controls.removeAllViews(); controls.visibility=View.VISIBLE; panel=true
         val retryable=if(problem is PlaybackException) problem.errorCode in 2000..2999 || problem.errorCode==PlaybackException.ERROR_CODE_TIMEOUT else problem is java.io.IOException
         playbackText.text=if(decoding) "电视无法解码当前视频，可尝试更低清晰度。" else "播放失败，可重试或切换清晰度。"
         val actions=row(); controls.addView(actions)
         addButton(actions,"立即重试") { playEpisode(episodeIndex,retryPosition,retryAutoplay) }.requestFocus()
-        addButton(actions,"尝试 720P") { library.maxQuality=720; playEpisode(episodeIndex,retryPosition,retryAutoplay) }
+        addButton(actions,"改用 720P") {
+            qualityCap=720; qualityCapKey="${detail?.series?.id.orEmpty()}:$episodeIndex"; autoFallbackTried=true
+            Toast.makeText(this,"本次播放改用 720P，默认清晰度不变",Toast.LENGTH_SHORT).show()
+            playEpisode(episodeIndex,retryPosition,retryAutoplay)
+        }
         if(feedMode) addButton(actions,"换下一部") { panel=false; switchFeed(1) }
         addButton(actions,if(feedMode) "返回推荐" else "返回选集") { if(feedMode) { directPlayback=true; returnToDetail() } else returnToDetail(true) }
         if(retryable && !sleepStopped) {
@@ -1720,7 +1773,7 @@ class MainActivity: Activity() {
         val actions=row(); bar.addView(actions); controls.addView(bar,lp(-1,-2))
         transportPlay=addButton(actions,if(player?.playWhenReady==true) "暂停播放" else "继续播放") { togglePlayback(); hidePlaybackOverlay() }
         addButton(actions,"下一集") { skipEpisode(1) }
-        val shortTitle=if(data.series.title.length>12) data.series.title.take(12)+"…" else data.series.title
+        val shortTitle=if(data.series.title.length>8) data.series.title.take(8)+"…" else data.series.title
         lateinit var collection: TextView
         collection=addButton(actions,"合集：$shortTitle｜全${data.episodes.size}集") { showEpisodePanel(collection) }
         lateinit var favorite: TextView
@@ -1731,20 +1784,22 @@ class MainActivity: Activity() {
             favorite.text=if(saved) "已追剧" else "追剧"
             Toast.makeText(this,if(saved) "已追剧，收藏里有更新会提醒" else "已取消追剧",Toast.LENGTH_SHORT).show()
         }
+        danmakuButton=addButton(actions,if(danmakuEnabled) "弹幕开" else "弹幕关") { toggleDanmaku() }
         lateinit var speed: TextView
         speed=addButton(actions,"倍速 ${PlaybackSpeed.label(library.playbackSpeed)}") { showSpeedPicker(speed) }
         lateinit var quality: TextView
         quality=addButton(actions,"清晰度 ${library.maxQuality}P") { showQualityPicker(quality,true) }
         lateinit var more: TextView
         more=addButton(actions,"更多设置") {
-            tvTools.choose("播放设置",listOf("倍速 ${PlaybackSpeed.label(library.playbackSpeed)}","清晰度 ${library.maxQuality}P","画面 ${library.frameMode.label}","定时 ${sleepTimer.label()}","从头播放"),more,{ choice ->
+            tvTools.choose("播放设置",listOf("倍速 ${PlaybackSpeed.label(library.playbackSpeed)}","清晰度 ${library.maxQuality}P","画面 ${library.frameMode.label}","定时 ${sleepTimer.label()}","弹幕设置","从头播放"),more,{ choice ->
                 main.post {
                     if(screen=="player" && more.isAttachedToWindow) when(choice) {
                         0 -> showSpeedPicker(more)
                         1 -> showQualityPicker(more,true)
                         2 -> showFramePicker(more,true)
                         3 -> showSleepPicker(more)
-                        4 -> { seekTo(0); hidePlaybackOverlay() }
+                        4 -> showDanmakuSettings(more)
+                        5 -> { seekTo(0); hidePlaybackOverlay() }
                     }
                 }
             })
@@ -1787,7 +1842,7 @@ class MainActivity: Activity() {
     private fun seekTo(position: Long) {
         val p=player ?: return; if(!playbackReady || p.duration<=0) return
         main.removeCallbacks(seekRunnable); pendingSeek=null
-        p.seekTo(position.coerceIn(0,(p.duration-500).coerceAtLeast(0))); updatePlaybackText(); syncMediaSession(); showHud()
+        p.seekTo(position.coerceIn(0,(p.duration-500).coerceAtLeast(0))); resetDanmaku(); updatePlaybackText(); syncMediaSession(); showHud()
     }
     private fun skipEpisode(direction: Int) {
         if(!foreground || screen!="player") return
@@ -1856,9 +1911,11 @@ class MainActivity: Activity() {
         if(!portrait) {
             view.layoutParams=FrameLayout.LayoutParams(-1,-1)
             backdrop?.visibility=View.GONE
+            syncDanmakuFrame()
             return
         }
         view.layoutParams=FrameLayout.LayoutParams((metrics.heightPixels*aspect).roundToInt().coerceIn(dp(120),metrics.widthPixels),metrics.heightPixels,Gravity.CENTER)
+        syncDanmakuFrame()
         val cover=backdrop ?: return
         val url=detail?.series?.cover.orEmpty()
         if(url!=backdropCover) {
@@ -1866,6 +1923,12 @@ class MainActivity: Activity() {
             if(url.isBlank()) cover.setImageDrawable(null) else artwork.load(cover,url,ArtworkLoader.PRIORITY_VISIBLE,dp(200),dp(200))
         }
         cover.visibility=View.VISIBLE
+    }
+    /** 弹幕只铺在画面区域内：竖屏收窄时跟着播放器一起收窄。 */
+    private fun syncDanmakuFrame() {
+        val layer=danmakuView ?: return
+        val params=playerView?.layoutParams as? FrameLayout.LayoutParams ?: return
+        layer.layoutParams=FrameLayout.LayoutParams(params.width,params.height,params.gravity)
     }
     /** 竖屏时信息区只占左侧模糊封面那一条，不压到画面上。 */
     private fun feedInfoWidth(): Int {
@@ -1898,16 +1961,18 @@ class MainActivity: Activity() {
         val options=row().apply { setPadding(0,dp(8),0,0) }; controls.addView(options)
         lateinit var episodes: TextView
         episodes=addButton(options,"选集") { showEpisodePanel(episodes) }
+        danmakuButton=addButton(options,if(danmakuEnabled) "弹幕开" else "弹幕关") { toggleDanmaku() }
         lateinit var more: TextView
         more=addButton(options,"播放设置") {
-            tvTools.choose("播放设置",listOf("倍速 ${PlaybackSpeed.label(library.playbackSpeed)}","清晰度 ${library.maxQuality}P","画面 ${library.frameMode.label}","定时 ${sleepTimer.label()}","从头播放"),more,{ choice ->
+            tvTools.choose("播放设置",listOf("倍速 ${PlaybackSpeed.label(library.playbackSpeed)}","清晰度 ${library.maxQuality}P","画面 ${library.frameMode.label}","定时 ${sleepTimer.label()}","弹幕设置","从头播放"),more,{ choice ->
                 main.post {
                     if(screen=="player" && more.isAttachedToWindow) when(choice) {
                         0 -> showSpeedPicker(more)
                         1 -> showQualityPicker(more,true)
                         2 -> showFramePicker(more,true)
                         3 -> showSleepPicker(more)
-                        4 -> { seekTo(0); hidePanel() }
+                        4 -> showDanmakuSettings(more)
+                        5 -> { seekTo(0); hidePanel() }
                     }
                 }
             })
@@ -1937,8 +2002,8 @@ class MainActivity: Activity() {
         val options=PlaybackQuality.options
         val dialog=AlertDialog.Builder(this).setTitle("全局默认清晰度")
             .setSingleChoiceItems(options.map { "${it}P" }.toTypedArray(),options.indexOf(library.maxQuality)) { popup,index ->
-                val target=options[index]; val changed=library.maxQuality!=target
-                library.maxQuality=target; popup.dismiss()
+                val target=options[index]; val changed=library.maxQuality!=target || qualityCap!=null
+                library.maxQuality=target; qualityCap=null; qualityCapKey=""; autoFallbackTried=false; popup.dismiss()
                 if(anchor.tag!="playback-settings") anchor.text=(if(inPlayer) "清晰度 " else "默认清晰度  ·  ")+"${target}P"
                 if(inPlayer && changed) playEpisode(episodeIndex,currentPosition(),player?.playWhenReady ?: requestedAutoplay)
             }.setNegativeButton("取消",null).create()
@@ -1983,13 +2048,155 @@ class MainActivity: Activity() {
         val oldPanel=episodePanel; episodePanel=null; oldPanel?.dismiss(); foreground=wasForeground
         speedDialog?.dismiss(); speedDialog=null
         main.removeCallbacks(hideHud); main.removeCallbacks(seekRunnable); pendingSeek=null
+        main.removeCallbacks(danmakuTick)
         playerListener?.let { player?.removeListener(it) }; playerListener=null
         video?.close(); video=null; playerView?.player=null; playerView=null; player?.release(); player=null; playbackReady=false; transportPlay=null; sleepButton=null
         backdrop=null; backdropCover=""; videoAspect=0f; feedPortrait=false
+        danmakuView=null; danmakuButton=null; danmakuItems.clear(); danmakuLoadedUntil=0; danmakuVideoId=""; danmakuLoading=false; danmakuFailedAt=0
         closeTransport(playbackHttp); playbackHttp=null
         window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
     }
+    private val danmakuSizeLabels=listOf("小","中","大")
+    private val danmakuSizeValues=listOf(16f,20f,24f)
+    private val danmakuAlphaValues=listOf(60,80,100)
+    private val danmakuSpeedLabels=listOf("慢","标准","快")
+    private val danmakuSpeedValues=listOf(16_000L,12_000L,9_000L)
+    private val danmakuLineValues=listOf(3,5,7)
+
+    private fun applyDanmakuStyle(view: DanmakuView?=danmakuView) {
+        view?.configure(danmakuSizeValues[danmakuSize],danmakuAlpha,danmakuSpeedValues[danmakuSpeed],danmakuLineValues[danmakuLines])
+    }
+    private fun danmakuSummary()="字号${danmakuSizeLabels[danmakuSize]} · ${danmakuAlpha}% · ${danmakuSpeedLabels[danmakuSpeed]} · ${danmakuLineValues[danmakuLines]}行"
+    private fun showDanmakuSettings(anchor: TextView) {
+        val content=column().apply { setPadding(dp(22),dp(10),dp(22),dp(4)) }
+        lateinit var sizeButton: TextView
+        lateinit var alphaButton: TextView
+        lateinit var speedButton: TextView
+        lateinit var lineButton: TextView
+        fun refresh() {
+            if(anchor.tag!="playback-settings") anchor.text="弹幕设置  ·  ${danmakuSummary()}"
+            sizeButton.text="字号  ·  ${danmakuSizeLabels[danmakuSize]}"
+            alphaButton.text="不透明度  ·  ${danmakuAlpha}%"
+            speedButton.text="滚动速度  ·  ${danmakuSpeedLabels[danmakuSpeed]}"
+            lineButton.text="最多行数  ·  ${danmakuLineValues[danmakuLines]} 行"
+        }
+        fun changed(block: ()->Unit) {
+            block()
+            danmakuPrefs.edit().putInt("danmakuSize",danmakuSize).putInt("danmakuAlpha",danmakuAlpha)
+                .putInt("danmakuSpeed",danmakuSpeed).putInt("danmakuLines",danmakuLines).apply()
+            refresh(); applyDanmakuStyle()
+        }
+        content.addView(text("按确认切换，立即生效并记住；推荐连播和普通播放共用。",13f,muted).apply { setPadding(dp(2),0,dp(2),dp(10)) })
+        sizeButton=button("") { changed { danmakuSize=(danmakuSize+1)%danmakuSizeLabels.size } }
+        alphaButton=button("") { changed { danmakuAlpha=danmakuAlphaValues[(danmakuAlphaValues.indexOf(danmakuAlpha)+1)%danmakuAlphaValues.size] } }
+        speedButton=button("") { changed { danmakuSpeed=(danmakuSpeed+1)%danmakuSpeedLabels.size } }
+        lineButton=button("") { changed { danmakuLines=(danmakuLines+1)%danmakuLineValues.size } }
+        listOf(sizeButton,alphaButton,speedButton,lineButton).forEach { view ->
+            content.addView(view,lp().apply { bottomMargin=dp(8) })
+        }
+        refresh()
+        val dialog=AlertDialog.Builder(this).setTitle("弹幕设置").setView(content).setNegativeButton("关闭",null).create()
+        dialog.setOnDismissListener {
+            if(anchor.isAttachedToWindow) { anchor.requestFocus(); if(screen=="player") showHud() }
+        }
+        dialog.show(); sizeButton.requestFocus()
+    }
+    /** 换集/换部：清掉上一集的弹幕，等播放器就绪后按当前进度重新取。 */
+    private fun startDanmaku(videoId: String,seriesId: String) {
+        if(danmakuCacheVideo!=videoId) {
+            danmakuCache.clear(); danmakuCacheVideo=videoId
+            danmakuView?.clearSprites()
+        }
+        danmakuVideoId=videoId; danmakuSeriesId=seriesId
+        danmakuItems.clear(); danmakuLoadedUntil=0; danmakuLoading=false; danmakuFailedAt=0
+        danmakuView?.clear(); danmakuView?.visibility=View.INVISIBLE
+        updateDanmakuButton()
+        main.removeCallbacks(danmakuTick)
+        if(danmakuEnabled) main.post(danmakuTick)
+    }
+    private val danmakuTick=object: Runnable {
+        override fun run() {
+            if(screen!="player" || !foreground || !danmakuEnabled) return
+            pumpDanmaku(); applyDanmakuVisibility(); danmakuView?.invalidate()
+            main.postDelayed(this,400)
+        }
+    }
+    /** 弹幕按 30 秒一段取：先补齐当前进度所在的一段，快播完时预取下一段。 */
+    private fun pumpDanmaku() {
+        val p=player ?: return
+        if(!playbackReady || playError || video==null || danmakuLoading) return
+        val position=p.currentPosition.coerceAtLeast(0)
+        val duration=p.duration.takeIf { it>0 && it!=androidx.media3.common.C.TIME_UNSET } ?: (position+600_000L)
+        if(duration<=position) return
+        val start=when {
+            danmakuLoadedUntil==0L -> position/DANMAKU_WINDOW*DANMAKU_WINDOW
+            position>=danmakuLoadedUntil-5_000 -> danmakuLoadedUntil
+            else -> return
+        }
+        if(danmakuFailedAt>0 && android.os.SystemClock.elapsedRealtime()-danmakuFailedAt<15_000) return
+        // 本集播完时下一段起点会等于总时长，别再去请求空区间。
+        if(start>=duration) return
+        loadDanmaku(start,duration)
+    }
+    private fun loadDanmaku(start: Long,duration: Long) {
+        val videoId=danmakuVideoId; val seriesId=danmakuSeriesId
+        if(videoId.isEmpty() || seriesId.isEmpty() || screen!="player") return
+        danmakuCache.get(start)?.let { cached -> applyDanmakuPage(cached); return }
+        danmakuLoading=true
+        io.execute {
+            val result=runCatching { repository.danmaku(videoId,seriesId,start,duration) }
+            main.post {
+                if(isDestroyed) return@post
+                danmakuLoading=false
+                if(screen!="player" || danmakuVideoId!=videoId) return@post
+                result.onSuccess { page ->
+                    danmakuCache.put(page)
+                    applyDanmakuPage(page)
+                    android.util.Log.i("HongguoTV","Danmaku start=$start next=${page.nextMs} items=${page.items.size} total=${page.total} loaded=${danmakuItems.size}")
+                }.onFailure { problem ->
+                    danmakuFailedAt=android.os.SystemClock.elapsedRealtime()
+                    android.util.Log.w("HongguoTV","Danmaku failed start=$start: ${problem.message}")
+                    if(danmakuItems.isEmpty()) applyDanmakuVisibility()
+                }
+            }
+        }
+    }
+    /** 合并一段弹幕并重排轨道；并发请求回来得晚时，已经覆盖过的区间不回退。 */
+    private fun applyDanmakuPage(page: DanmakuPage) {
+        danmakuFailedAt=0
+        if(page.nextMs<=danmakuLoadedUntil) return
+        val known=danmakuItems.mapTo(HashSet()) { it.id }
+        danmakuItems+=page.items.filter { it.id !in known }
+        // 长剧集只留最近的一段，避免整集弹幕一直占着内存。
+        if(danmakuItems.size>600) danmakuItems.subList(0,danmakuItems.size-600).clear()
+        danmakuLoadedUntil=page.nextMs
+        danmakuView?.submit(DanmakuPage.merge(danmakuItems))
+        applyDanmakuVisibility()
+    }
+    /** 推荐浮层打开时先让弹幕退场：导航和剧名区域不叠字。 */
+    private fun applyDanmakuVisibility() {
+        val view=danmakuView ?: return
+        val occupied=feedMode && hud.visibility==View.VISIBLE
+        val show=danmakuEnabled && screen=="player" && danmakuItems.isNotEmpty() && !occupied
+        view.visibility=if(show) View.VISIBLE else View.INVISIBLE
+    }
+    /** 拖动进度后重新按新位置取弹幕，避免把上一段的弹幕留在画面上。 */
+    private fun resetDanmaku() {
+        if(!danmakuEnabled) return
+        danmakuItems.clear(); danmakuView?.clear(); danmakuLoadedUntil=0; danmakuFailedAt=0
+        main.removeCallbacks(danmakuTick); if(foreground) main.post(danmakuTick)
+    }
+    private fun toggleDanmaku() {
+        danmakuEnabled=!danmakuEnabled
+        danmakuPrefs.edit().putBoolean("danmaku",danmakuEnabled).apply()
+        if(danmakuEnabled) { danmakuLoadedUntil=0; danmakuFailedAt=0; main.removeCallbacks(danmakuTick); main.post(danmakuTick) }
+        else { danmakuItems.clear(); danmakuView?.clear() }
+        applyDanmakuVisibility(); updateDanmakuButton(); showHud()
+        Toast.makeText(this,if(danmakuEnabled) "弹幕已打开" else "弹幕已关闭",Toast.LENGTH_SHORT).show()
+    }
+    private fun updateDanmakuButton() { danmakuButton?.text=if(danmakuEnabled) "弹幕开" else "弹幕关" }
     private fun returnToDetail(forceDetail: Boolean=false) {
+        qualityCap=null; qualityCapKey=""; autoFallbackTried=false
         sleepTimer.cancel(); sleepStopped=false; saveProgress(); library.flush(); invalidatePage(); releasePlayer()
         if(directPlayback && !forceDetail) showCatalog() else { directPlayback=false; showDetail(true) }
     }
@@ -2026,6 +2233,9 @@ class MainActivity: Activity() {
     }
     @Deprecated("TV remote back is handled through the activity")
     override fun onBackPressed()=goBack()
+    /** 不同遥控器把「菜单」映射成不同按键：MENU、INFO、内容菜单或红/蓝功能键。 */
+    private fun isMenuKey(key: Int)=key==KeyEvent.KEYCODE_MENU || key==KeyEvent.KEYCODE_INFO ||
+        key==KeyEvent.KEYCODE_TV_CONTENTS_MENU || key==KeyEvent.KEYCODE_PROG_RED || key==KeyEvent.KEYCODE_PROG_BLUE
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
         if(screen=="player") {
             val key=event.keyCode
@@ -2043,7 +2253,7 @@ class MainActivity: Activity() {
                 }
                 return true
             }
-            if(key==KeyEvent.KEYCODE_MENU) {
+            if(isMenuKey(key)) {
                 // 推荐连播用菜单键开关浮层菜单；普通播放沿用原来的设置面板。
                 if(event.action==KeyEvent.ACTION_DOWN && event.repeatCount==0) { if(feedMode) { if(panel) hidePlaybackOverlay() else revealFeedChrome() } else if(!panel) showPanel() }
                 return true
@@ -2098,7 +2308,7 @@ class MainActivity: Activity() {
         player?.pause(); saveProgress(); flushRecommendTypes(); library.flush(); super.onPause()
     }
     override fun onStop() {
-        restoreStoppedPage=true; generation++; cancelWork(); tvTools.close()
+        restoreStoppedPage=true; generation++; cancelWork(); tvTools.close(); main.removeCallbacks(danmakuTick)
         if(screen=="player") { startPosition=currentPosition(); saveProgress(); releasePlayer() }
         artwork.cancelPage(clearMemory=true); library.flush(); super.onStop()
     }

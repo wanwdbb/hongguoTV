@@ -80,6 +80,29 @@ fun main(args: Array<String>) {
         }
         return
     }
+    if(args.contains("--danmaku")) {
+        // 弹幕探针：看某个剧的第一集在 0~30 秒有多少条，以及下一段从哪开始。
+        val seriesId=args.firstOrNull { it.matches(Regex("[0-9]{1,30}")) } ?: "0"
+        try {
+            if(!DeviceIdentity.registered) runCatching { repository.registerDevice() }.onSuccess { DeviceIdentity.apply(it.installId,it.deviceId) }.onFailure { println("register failed=${it.message}") }
+            println("identity registered=${DeviceIdentity.registered} device_id=${DeviceIdentity.deviceId}")
+            val detail=repository.detail(seriesId)
+            println("series=${detail.series.title}; episodes=${detail.episodes.size}")
+            val videoId=detail.episodes.first()
+            var start=0L
+            repeat(3) { index ->
+                val page=runCatching { repository.danmaku(videoId,seriesId,start,600_000L) }
+                    .onFailure { println("window=$index start=$start failed=${it.message}") }.getOrNull() ?: return@repeat
+                println("window=$index start=${page.startMs} next=${page.nextMs} total=${page.total} items=${page.items.size}")
+                page.items.take(5).forEach { println("  ${it.timeMs}ms ${it.text}") }
+                if(page.nextMs<=start) return@repeat
+                start=page.nextMs
+            }
+        } finally {
+            repository.http.connectionPool.evictAll(); repository.http.dispatcher.executorService.shutdown()
+        }
+        return
+    }
     if(args.contains("--register")) {
         try {
             val registration=repository.registerDevice()

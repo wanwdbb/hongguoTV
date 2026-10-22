@@ -258,6 +258,12 @@ class MainActivity: Activity() {
     private var episodeIndex=0
     private var group=0
     private var synopsisExpanded=false
+    /** 从详情页进入的作者/主创页，以及返回时应恢复的详情页。 */
+    private var character: CreatorPage?=null
+    private var characterPerson: Person?=null
+    private var characterReturnDetail: Detail?=null
+    private var detailFromCharacter=false
+    private var characterFocus=""
     private var player: ExoPlayer?=null
     private var video: RemoteVideo?=null
     private var playbackReady=false
@@ -710,6 +716,7 @@ class MainActivity: Activity() {
     }
     private fun showCatalog(load: Boolean=false,focusNav: Boolean=false,focusType: Boolean=false,focusSection: Boolean=false) {
         initialCatalogPending=false; restoreStoppedPage=false; pendingDetail=null
+        character=null; characterPerson=null; characterReturnDetail=null; detailFromCharacter=false
         val keepSection=sectionButtons.values.any { it.hasFocus() } || (focusSection && !focusNav)
         // 推荐页现在就是连播页：不再显示卡片，进入推荐立刻自动播放。
         if(tab==TAB_RECOMMEND && collection==null) { enterFeed(); return }
@@ -1271,8 +1278,10 @@ class MainActivity: Activity() {
             }
         })
     }
-    private fun openDetail(series: Series,resume: Boolean=false,autoplay: Boolean=true) {
+    private fun openDetail(series: Series,resume: Boolean=false,autoplay: Boolean=true,fromCharacter: Boolean=false) {
         pendingDetail=series; detailAutoplay=autoplay
+        if(!fromCharacter) { character=null; characterPerson=null; characterReturnDetail=null }
+        detailFromCharacter=fromCharacter
         invalidatePage(); releaseCatalogViews(); screen="detail"; directPlayback=resume; detail=null; synopsisExpanded=false
         val body=base(series.title); message(body,"正在加载剧集…")
         work({ repository.detail(series.id) }, { result ->
@@ -1281,7 +1290,7 @@ class MainActivity: Activity() {
             val target=ResumePlayback.target(result.episodes,progress?.episodeId,progress?.position ?: 0,progress?.completed==true)
             episodeIndex=target.index; group=episodeIndex/20
             if(resume) playEpisode(target.index,target.position,autoplay=detailAutoplay) else showDetail(false)
-        }, { problem -> error(body,problem) { openDetail(series,resume,detailAutoplay) } })
+        }, { problem -> error(body,problem) { openDetail(series,resume,detailAutoplay,fromCharacter) } })
     }
     /**
      * 推荐页就是播放页：进入推荐立刻自动播放（没有卡片），播放中 ↑/↓ 换上一部/下一部。
@@ -1458,6 +1467,11 @@ class MainActivity: Activity() {
             synopsisButton.text=if(synopsisExpanded) "收起简介" else "完整简介"
             synopsisButton.post { synopsisButton.requestRectangleOnScreen(android.graphics.Rect(0,0,synopsisButton.width,synopsisButton.height),false) }
         }
+        if(data.people.isNotEmpty()) {
+            lateinit var authorButton: TextView
+            authorButton=addButton(actions,"作者页") { choosePeople(data.people,authorButton) }
+            authorButton.contentDescription="进入作者页，查看同一作者的作品列表"
+        }
         content.addView(hero)
         val groupRow=row(); groupRow.setPadding(0,dp(3),0,dp(5))
         val maxGroup=data.episodes.lastIndex/20; group=group.coerceIn(0,maxGroup)
@@ -1476,6 +1490,78 @@ class MainActivity: Activity() {
         }
         episodes.forEachIndexed { i,v -> v.nextFocusLeftId=if(i%10==0) v.id else episodes[i-1].id; v.nextFocusRightId=if(i%10==9 || i==episodes.lastIndex) v.id else episodes[i+1].id; if(i>=10) v.nextFocusUpId=episodes[i-10].id; v.nextFocusDownId=if(i+10<episodes.size) episodes[i+10].id else v.id }
         if(focusEpisode) episodes.getOrNull((episodeIndex-group*20).coerceIn(0,episodes.lastIndex))?.requestFocus() else play.requestFocus()
+    }
+    /** 详情页的「作者页」入口：一个人直接进入，多个人先选择。 */
+    private fun choosePeople(people: List<Person>,anchor: View) {
+        if(people.size==1) { openCharacter(people.first()); return }
+        val labels=people.map { person -> person.role.takeIf { it.isNotBlank() }?.let { "${person.name} · $it" } ?: person.name }
+        tvTools.choose("选择要查看的作者/主创",labels,anchor,{ index -> people.getOrNull(index)?.let(::openCharacter) })
+    }
+    /** 作者/主创页：同一演员或主创的作品列表。 */
+    private fun openCharacter(person: Person) {
+        invalidatePage(); releaseCatalogViews()
+        screen="character"; character=null; characterPerson=person; characterFocus=""
+        characterReturnDetail=detail
+        val body=base("作者页"); message(body,"正在加载 ${person.name} 的作品…")
+        work({ if(person.creator) repository.creatorPage(person) else repository.character(person.id) },
+            { result -> character=result; showCharacter() },
+            { problem -> error(body,problem) { openCharacter(person) } })
+    }
+    private fun showCharacter() {
+        invalidatePage(); releaseCatalogViews(); screen="character"
+        val data=character
+        if(data==null) { showDetail(false); return }
+        val body=base()
+        val heading=row(); val back=addButton(heading,"‹ 返回") { goBack() }
+        heading.addView(text("作者页",22f).apply { setTypeface(null,Typeface.BOLD) },lp(0,dp(44)).apply { weight=1f })
+        body.addView(heading)
+        val scroll=ScrollView(this).apply { isVerticalScrollBarEnabled=false }; val content=column(); scroll.addView(content); body.addView(scroll,lp(-1,0).apply { weight=1f })
+        val header=row(); header.gravity=Gravity.TOP; header.setPadding(0,dp(8),0,dp(12))
+        val avatar=ImageView(this).apply { scaleType=ImageView.ScaleType.FIT_CENTER; background=rounded(surface) }
+        header.addView(avatar,lp(dp(116),dp(116)).apply { rightMargin=dp(20) }); if(data.avatar.isNotBlank()) loadCover(avatar,data.avatar)
+        val info=column(); header.addView(info,lp(0,-2).apply { weight=1f })
+        info.addView(text(data.name,26f).apply { setTypeface(null,Typeface.BOLD); maxLines=1; ellipsize=TextUtils.TruncateAt.END })
+        val roles=data.roles.ifEmpty { listOfNotNull(characterPerson?.role?.takeIf { it.isNotBlank() }) }
+        val meta=(if(roles.isEmpty()) emptyList() else listOf(roles.joinToString(" · ")))+listOfNotNull(data.fans.takeIf { it>0 }?.let { "${it} 粉丝" })
+        if(meta.isNotEmpty()) info.addView(text(meta.joinToString("  ·  "),13f,muted).apply { setPadding(0,dp(6),0,dp(6)) })
+        if(data.description.isNotBlank()) info.addView(text(data.description,15f,muted).apply { maxLines=4; ellipsize=TextUtils.TruncateAt.END })
+        info.addView(text("作品 ${data.works.size}",18f).apply { setTypeface(null,Typeface.BOLD); setPadding(0,dp(10),0,0) })
+        content.addView(header)
+        val list=column(); content.addView(list)
+        val cards=mutableListOf<View>()
+        val count=6; val gap=dp(14); val width=((resources.displayMetrics.widthPixels*.9f-gap*(count-1))/count).toInt()
+        data.works.chunked(count).forEach { items ->
+            val line=row(); line.gravity=Gravity.TOP
+            items.forEachIndexed { columnIndex,item ->
+                val card=column(); card.setPadding(dp(4),dp(4),dp(4),dp(9)); focusStyle(card); card.contentDescription=item.title; card.tag=item.id
+                val artwork=FrameLayout(this); card.addView(artwork,lp(-1,((width-dp(8))/TvStyle.POSTER_ASPECT).toInt()))
+                val image=ImageView(this).apply { scaleType=ImageView.ScaleType.FIT_CENTER; importantForAccessibility=View.IMPORTANT_FOR_ACCESSIBILITY_NO }
+                artwork.addView(image,FrameLayout.LayoutParams(-1,-1)); loadCover(image,item.cover)
+                card.addView(text(item.title,14f).apply { maxLines=2; minLines=2; ellipsize=TextUtils.TruncateAt.END; setPadding(dp(3),dp(7),dp(3),0) },lp(-1,-2).apply { weight=1f })
+                card.addView(text(item.badge,12f,muted).apply { maxLines=1; minLines=1; minHeight=dp(19); ellipsize=TextUtils.TruncateAt.END; setPadding(dp(3),0,0,0) },lp(-1,-2))
+                card.setOnClickListener { characterFocus=item.id; openDetail(item,false,true,true) }
+                card.setOnFocusChangeListener { _,focused -> card.background=TvStyle.card(this,focused); if(focused) { characterFocus=item.id; loadCover(image,item.cover) } }
+                line.addView(card,lp(width,-1).apply { if(columnIndex<count-1) rightMargin=gap }); cards+=card
+            }
+            repeat(count-items.size) { line.addView(Space(this),lp(width,-1).apply { rightMargin=gap }) }
+            list.addView(line,lp(-1,-2).apply { bottomMargin=dp(10) })
+        }
+        cards.forEachIndexed { index,card ->
+            card.nextFocusLeftId=if(index%count==0) card.id else cards[index-1].id
+            card.nextFocusRightId=if(index%count==count-1 || index==cards.lastIndex) card.id else cards[index+1].id
+            card.nextFocusUpId=if(index<count) back.id else cards[index-count].id
+            card.nextFocusDownId=if(index+count<cards.size) cards[index+count].id else card.id
+        }
+        val target=cards.firstOrNull { it.tag==characterFocus } ?: cards.firstOrNull()
+        back.nextFocusDownId=target?.id ?: back.id
+        if(data.works.isEmpty()) {
+            message(list,"这个作者暂时没有作品。")
+            val returnButton=addButton(list,"返回详情") { goBack() }
+            back.nextFocusDownId=returnButton.id; returnButton.nextFocusUpId=back.id
+            returnButton.requestFocus()
+        } else {
+            target?.requestFocus()
+        }
     }
     private fun playEpisode(index: Int,position: Long=0,autoplay: Boolean=true,recovering: Boolean=false,saveCurrent: Boolean=true,ready: FeedReady?=null) {
         updater.interrupt()
@@ -2206,7 +2292,12 @@ class MainActivity: Activity() {
         if(!library.isLoaded) { finish(); return }
         when(screen) {
             "player" -> if(feedMode) feedBack() else if(hud.visibility==View.VISIBLE && !playError) hidePlaybackOverlay() else returnToDetail()
-            "detail" -> showCatalog()
+            "detail" -> if(detailFromCharacter && character!=null) showCharacter() else showCatalog()
+            "character" -> {
+                val back=characterReturnDetail
+                character=null; characterPerson=null; characterReturnDetail=null; detailFromCharacter=false
+                if(back!=null) { detail=back; showDetail(false) } else showCatalog()
+            }
             else -> when {
                 collection!=null -> { leaveCollection(); showCatalog() }
                 sectionButtons.values.any { it.hasFocus() } -> nav.getOrNull(tab)?.requestFocus()
@@ -2281,6 +2372,7 @@ class MainActivity: Activity() {
         when(screen) {
             "player" -> { val position=currentPosition(); val autoplay=player?.playWhenReady==true && !pausedForLifecycle; playEpisode(episodeIndex,position,autoplay) }
             "detail" -> if(detail!=null) showDetail(false)
+            "character" -> if(character!=null) showCharacter() else if(detail!=null) showDetail(false) else showCatalog()
             else -> showCatalog()
         }
     }
@@ -2293,7 +2385,8 @@ class MainActivity: Activity() {
                 restoreStoppedPage=false
                 when(screen) {
                     "player" -> playEpisode(episodeIndex,startPosition,autoplay=false)
-                    "detail" -> if(detail!=null) showDetail(false) else pendingDetail?.let { openDetail(it,directPlayback,autoplay=false) } ?: showCatalog()
+                    "detail" -> if(detail!=null) showDetail(false) else pendingDetail?.let { openDetail(it,directPlayback,autoplay=false,fromCharacter=detailFromCharacter) } ?: showCatalog()
+                    "character" -> if(character!=null) showCharacter() else if(detail!=null) showDetail(false) else showCatalog()
                     else -> showCatalog(load=!localCatalog() && catalog.isEmpty() && (tab==TAB_HOME || tab==TAB_RANK || tab==TAB_CATEGORY || tab==TAB_RECOMMEND || (tab==TAB_SEARCH && query.isNotBlank())))
                 }
             } else {

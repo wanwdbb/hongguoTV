@@ -2,6 +2,7 @@
 package com.hongguotv.core
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class DanmakuTest {
@@ -36,12 +37,54 @@ class DanmakuTest {
         assertEquals("哈  ♥ 2",merged.single().text)
     }
 
-    @Test fun facePlaceholdersBecomeReadableText() {
-        assertEquals("这也太偷笑了",danmakuFaceText("这也太[偷笑]了"))
-        assertEquals("赞中国赞",danmakuFaceText("[赞][中国赞]"))
-        // 未收录的方括号内容保持原样，普通括号文本也不能被误改。
-        assertEquals("[未知表情]",danmakuFaceText("[未知表情]"))
-        assertEquals("【偷笑】",danmakuFaceText("【偷笑】"))
+    @Test fun facePlaceholdersBecomeEmojiImages() {
+        val parts=danmakuParts("这也太[偷笑]了")
+        assertEquals("这也太",parts[0].text)
+        assertEquals("🤭",parts[1].text)
+        assertEquals("1f92d.png",parts[1].emojiAsset)
+        assertEquals("[偷笑]",parts[1].fallback)
+        assertEquals("了",parts[2].text)
+    }
+
+    @Test fun referenceNamesMapToGlyphs() {
+        assertEquals("🤭",danmakuDisplayText("[偷笑]"))
+        assertEquals("👍👍",danmakuDisplayText("[赞][点赞]"))
+        assertEquals("🤭",danmakuDisplayText("【捂嘴笑】"))
+        assertEquals("🤭",danmakuDisplayText("［偷笑］"))
+        assertEquals("😮‍💨",danmakuDisplayText("[叹气]"))
+    }
+
+    @Test fun unknownOrUnclosedPlaceholdersStayLiteral() {
+        assertEquals("[中国赞]",danmakuDisplayText("[中国赞]"))
+        assertEquals("[未知表情]",danmakuDisplayText("[未知表情]"))
+        assertEquals("[偷笑",danmakuDisplayText("[偷笑"))
+    }
+
+    @Test fun compoundExpressionsUseMultipleImages() {
+        val parts=danmakuParts("[吐舌小狗]")
+        assertEquals(listOf("1f436.png","1f61b.png"),parts.mapNotNull { it.emojiAsset })
+        assertEquals(listOf("[吐舌小狗]","[吐舌小狗]"),parts.map { it.fallback })
+    }
+
+    @Test fun directEmojiAlsoUsesImage() {
+        val parts=danmakuParts("好😁")
+        assertEquals("好",parts[0].text)
+        assertEquals("1f601.png",parts[1].emojiAsset)
+        assertEquals("😁",parts[1].text)
+    }
+
+    @Test fun expressionNamesAreCaseInsensitive() {
+        assertEquals("👌",danmakuDisplayText("[OK]"))
+        assertEquals("👌",danmakuDisplayText("[ok]"))
+    }
+
+    @Test fun everyReferenceNameResolvesToImages() {
+        assertEquals(236,DANMAKU_EMOJI_NAMES.size)
+        assertEquals(145,DANMAKU_EMOJI_ASSETS.size)
+        for(name in DANMAKU_EMOJI_NAMES.keys) {
+            val parts=danmakuParts("[$name]")
+            assertTrue("表情没有对应图片: $name",parts.isNotEmpty() && parts.all { it.emojiAsset!=null })
+        }
     }
 
     @Test fun cacheKeepsOnlyLatestSegments() {

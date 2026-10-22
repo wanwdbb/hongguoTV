@@ -227,9 +227,57 @@ GET https://hongguoduanju.com/detail?series_id={剧集ID}
 - `series_id` 只允许 1–30 位数字；
 - 取 `loaderData.detail_page.seriesDetail`；
 - `vid_list` 是分集视频 ID 数组（顺序即第 1 集、第 2 集…），必须非空、全为数字、无重复；
-- 剧集字段：`series_id`、`series_name`、`series_cover`、`series_intro`、`episode_right_text`、`tags[].name`（或 `category_list`）。
+- 剧集字段：`series_id`、`series_name`、`series_cover`、`series_intro`、`episode_right_text`、`tags[].name`（或 `category_list`）；
+- `celebrities[]` 是演员/主创：`celebrity_id`、`nickname`、`avatar`、`sub_title`，用于详情页的「作者页」入口；
+- `celebrities` 为空时，再调用「4.3 官方详情主创」补出品方；真人剧已有演员时不会多发这次请求。
 
-### 3.5 网页搜索（兜底）
+### 3.5 演员/主创页（网站角色页）
+
+```
+GET https://hongguoduanju.com/character/{celebrity_id}
+```
+
+- `celebrity_id` 只允许 1–30 位数字；官方 `main_creator_users` 的 `user_id` 不是 `celebrity_id`，不能直接拼到这条地址；
+- 取 `loaderData["character_(id)/page"]`；
+- `userInfo`：`person_id`、`user_name`、`user_avatar`、`description`、`subtitle_list[]`（如「女演员 / 导演 / 编剧」）、`user_relation_info.fans_num`；
+- `videoList[]` 是同一演员/主创的其他作品，字段与详情页的剧集卡片相同；作品列表复用详情页卡片解析。
+
+### 3.6 出品方作者页（官方资料 + 官方作品列表）
+
+网站没有单独的「作者」字段。漫剧/AI剧的出品方来自官方详情，主页按下面的流程拼：
+
+1. 用 `user_id` 调「4.3.2 官方用户资料」取名称、头像、简介、角色和粉丝数；
+2. 用同一个 `user_id` 调官方作者主页作品接口：
+
+   ```
+   POST https://api5-sinfnormal.fqnovel.com/novel/commentapi/user/profile/{user_id}/v1?{签名参数}
+   Content-Type: application/json; charset=utf-8
+   comment-source: 1506
+   lc: 101
+
+   {
+     "comment_source": 1506,
+     "count": 18,
+     "cursor": "",
+     "extra_param": {},
+     "locate_post_id": "",
+     "profile_user_type": 0,
+     "sort": "time_desc",
+     "sub_tab_type": 22,
+     "tab_type": 23,
+     "target_user_id": "{user_id}"
+   }
+   ```
+
+   这个接口要使用 `version_code=73932`、`version_name=7.3.9.32`；旧版本参数会返回 `total=0` 的空列表。
+
+3. 取 `data.data_list[].video`：`video_id` 就是短剧的 `series_id`，标题/封面/简介在 `common`，集数和角标在 `expand.episode_cnt`、`expand.sub_title_list`；
+4. 首页 `data.hightlight.total` 是作品总数（例如 `143`）；后续页该字段会变成 `0`，不能用来判断结束。把 `data.common_list_info.cursor` 原样放进下一次请求的 `cursor`，直到 `has_more=false` 或返回空页（最多 100 页）。服务端每页条数不固定，不能按 offset 推算；
+5. 按 `video_id` 去重；当前剧集也保留在作品列表中。
+
+该接口只返回 `target_user_id` 本人的作品，不会像网站关键词搜索那样混入同名或相关剧集，因此作者页不再使用网站搜索。拿不到资料时退回官方详情里的昵称与头像。漫画分类的样本没有 `main_creator_users`，因此没有可用的作者入口，按钮自动隐藏。
+
+### 3.7 网页搜索（兜底）
 
 ```
 GET https://hongguoduanju.com/search/{URL编码的关键词}?page=N
@@ -240,7 +288,7 @@ GET https://hongguoduanju.com/search/{URL编码的关键词}?page=N
 - 关键词用 `Signer.encode` 编码（空格转 `%20`）；
 - 取 `loaderData["search_(keyword)/page"]` 或 `search_page`；
 - 列表字段 `searchList`；
-- 网页搜索不区分内容类型，因此漫剧永远不会使用这条兜底。
+- 普通分类/搜索兜底仍只用于短剧；作者页的出品方作品列表改用 `3.6` 的官方作者主页作品接口，不再依赖关键词搜索。
 
 > 注意：网页搜索的 `page` 是独立分页，没有游标，翻页超过 100 页会被拒绝。
 
@@ -388,9 +436,51 @@ version_name = 7.2.2.32
 - `has_more`、`search_id`、`passback`、`next_offset`（字符串）作为下一页游标；
 - 空响应体直接抛「搜索接口暂不可用」，不再落到 JSON 解析错误。
 
-### 4.3 播放信息与播放地址
+### 4.3 详情主创与用户资料
 
-#### 4.3.1 播放信息
+#### 4.3.1 详情主创
+
+```
+POST https://api5-normal-sinfonlinea.fqnovel.com/novel/player/video_detail/v1/?{签名参数}
+Content-Type: application/json; charset=utf-8
+User-Agent: VIDEO_UA
+```
+
+版本字段与 4.2 相同，覆盖为 `72232` / `7.2.2.32`。请求体：
+
+```json
+{
+  "series_id": "7696437705822981182",
+  "biz_param": {
+    "video_id_type": 1,
+    "source": 5,
+    "detail_page_version": 1
+  }
+}
+```
+
+- `video_id_type=1` 表示 `SeriesId`；`source=5` 表示 `FromDetailPage`，必须是整数，传字符串会返回 HTTP 400；
+- 取 `data.video_data.main_creator_users[]`：`user_id`、`base_info.user_name`、`base_info.expand_user_avatar`（优先）或 `user_avatar`、`user_tag.sub_title_list[].text`（如「出品方」）、`user_relation.follow_user_num`；
+- 同一用户可能重复出现，按 `user_id` 去重；只保留 `user_id` 为纯数字且名称为非空的项；
+- 真人剧网站详情已有 `celebrities` 时不会调用；漫剧/AI剧通常在这里返回出品方，漫画样本没有该字段。
+
+#### 4.3.2 官方用户资料
+
+```
+GET https://api5-normal-sinfonlinea.fqnovel.com/reading/user/profile/get/v1/?{签名参数}&user_id={用户ID}
+```
+
+同样使用 `72232` / `7.2.2.32` 版本字段，额外带 `user_id`。
+
+- 取 `data.ugc_user`；
+- `base_info`：`user_name`、`description`、`expand_user_avatar`（JPEG，优先）、`user_avatar`；
+- `user_tag.sub_title_list[].text`：角色标签；
+- `user_relation.follow_user_num`：粉丝数；
+- 资料名称缺失时，作者页退回官方详情里的 `base_info.user_name`。
+
+### 4.4 播放信息与播放地址
+
+#### 4.4.1 播放信息
 
 ```
 POST https://api5-normal-sinfonlineb.fqnovel.com/novel/player/multi_video_model/preload/v1/?{签名参数}
@@ -438,7 +528,7 @@ User-Agent: VIDEO_UA
 - `fallback_api` 可能是字符串、对象里的 `fallback_api` 字段，或数组第一个元素；
 - `fallback_api` 必须以 `https://` 开头；
 
-#### 4.3.2 播放地址明细
+#### 4.4.2 播放地址明细
 
 ```
 GET {fallback_api}
@@ -475,7 +565,7 @@ User-Agent: VIDEO_UA
 5. `key_seed` 非空时，用 `MediaCrypto.decryptUrl` 解密 `main_url`（SHA-512 派生密钥 + AES-CBC，去掉填充与尾部零字节）；
 6. `spade_a` 非空时，用 `MediaCrypto.deriveKey` 派生分片解密密钥（AES-CTR）。
 
-#### 4.3.3 视频流
+#### 4.4.3 视频流
 
 ```
 GET {main_url}
@@ -496,7 +586,7 @@ Accept-Encoding: identity
 
 播放器不使用本地 HTTP 代理，直接把解密后的样本喂给 Media3。
 
-### 4.4 弹幕
+### 4.5 弹幕
 
 ```
 POST https://api5-normal-sinfonlineb.fqnovel.com/novel/commentapi/comment/list/{video_id}/v1/?{签名参数}

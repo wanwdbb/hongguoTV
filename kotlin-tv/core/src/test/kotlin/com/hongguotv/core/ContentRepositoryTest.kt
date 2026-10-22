@@ -399,4 +399,162 @@ class ContentRepositoryTest {
         assertEquals(install,DeviceIdentity.installId)
         assertEquals(device,DeviceIdentity.deviceId)
     }
+
+    @Test fun detailKeepsCastForAuthorPage() {
+        val repo=repository {
+            """<script>_ROUTER_DATA={"loaderData":{"detail_page":{"seriesDetail":{
+                "series_id":"123","series_name":"测试短剧","series_cover":"https://example.com/cover.jpg",
+                "series_intro":"简介","episode_cnt":12,"vid_list":["1","2"],
+                "celebrities":[
+                    {"celebrity_id":"760","nickname":"王志欣","avatar":"https:\\u002F\\u002Fexample.com\\u002Fa.jpg","sub_title":"饰 王妈"},
+                    {"celebrity_id":"760","nickname":"重复","sub_title":""},
+                    {"celebrity_id":"bad","nickname":"无效"},
+                    {"celebrity_id":"761","nickname":""}
+                ]}}}};</script>"""
+        }
+        val result=repo.detail("123")
+        assertEquals(listOf("1","2"),result.episodes)
+        assertEquals(listOf("王志欣"),result.people.map { it.name })
+        assertEquals("https://example.com/a.jpg",result.people.single().avatar)
+        assertEquals("饰 王妈",result.people.single().role)
+    }
+
+    @Test fun characterPageParsesProfileAndSameCreatorWorks() {
+        val repo=repository { request ->
+            assertEquals("/character/760",request.url.encodedPath)
+            """<script>_ROUTER_DATA={"loaderData":{"character_(id)/page":{
+                "person_id":"760","userInfo":{"person_id":"760","user_name":"王志欣",
+                "user_avatar":"https:\\u002F\\u002Fexample.com\\u002Favatar.jpg","description":"原创剧情达人",
+                "subtitle_list":["女演员","导演","编剧"],"user_relation_info":{"fans_num":216766}},
+                "videoList":[
+                    {"series_id":"456","series_title":"另一部作品","series_cover":"https:\\u002F\\u002Fexample.com\\u002Fb.jpg","series_intro":"简介","episode_cnt":45},
+                    {"series_id":"bad","series_title":"无效"}
+                ]}}};</script>"""
+        }
+        val result=repo.character("760")
+        assertEquals("760",result.id)
+        assertEquals("王志欣",result.name)
+        assertEquals("https://example.com/avatar.jpg",result.avatar)
+        assertEquals(listOf("女演员","导演","编剧"),result.roles)
+        assertEquals(216766L,result.fans)
+        assertEquals(listOf("456"),result.works.map { it.id })
+        assertEquals("另一部作品",result.works.single().title)
+        assertEquals("全 45 集",result.works.single().badge)
+        assertThrows(IllegalArgumentException::class.java) { repo.character("../bad") }
+    }
+
+    @Test fun detailUsesOfficialCreatorsWhenWebsiteHasNoCast() {
+        var officialCalls=0
+        val repo=repository { request ->
+            when(request.url.encodedPath) {
+                "/detail" -> """<script>_ROUTER_DATA={"loaderData":{"detail_page":{"seriesDetail":{
+                    "series_id":"123","series_name":"测试漫剧","series_intro":"简介",
+                    "episode_cnt":12,"vid_list":["1","2"],"celebrities":[]
+                }}}};</script>"""
+                "/novel/player/video_detail/v1/" -> {
+                    officialCalls++
+                    assertEquals("POST",request.method)
+                    """{"code":0,"data":{"video_data":{"main_creator_users":[
+                        {"user_id":"409","base_info":{"user_id":"409","user_name":"陈柯文化","user_avatar":"https:\\u002F\\u002Fexample.com\\u002Favatar.jpg"},
+                         "user_tag":{"sub_title_list":[{"text":"出品方"}]},"user_relation":{"follow_user_num":4}},
+                        {"user_id":"409","base_info":{"user_name":"重复"}},
+                        {"user_id":"bad","base_info":{"user_name":"无效"}}
+                    ]}}}"""
+                }
+                else -> error("unexpected ${request.url}")
+            }
+        }
+        val result=repo.detail("123")
+        assertEquals(1,officialCalls)
+        assertEquals(listOf("409"),result.people.map { it.id })
+        assertEquals("陈柯文化",result.people.single().name)
+        assertEquals("出品方",result.people.single().role)
+        assertEquals(4L,result.people.single().fans)
+        assertTrue(result.people.single().creator)
+    }
+
+    @Test fun detailWithoutCreatorDataKeepsAuthorEntryHidden() {
+        var officialCalls=0
+        val repo=repository { request ->
+            when(request.url.encodedPath) {
+                "/detail" -> """<script>_ROUTER_DATA={"loaderData":{"detail_page":{"seriesDetail":{
+                    "series_id":"123","series_name":"测试漫画","episode_cnt":12,"vid_list":["1","2"],"celebrities":[]
+                }}}};</script>"""
+                "/novel/player/video_detail/v1/" -> {
+                    officialCalls++
+                    """{"code":0,"data":{"video_data":{"series_id":"123"}}}"""
+                }
+                else -> error("unexpected ${request.url}")
+            }
+        }
+        val result=repo.detail("123")
+        assertEquals(1,officialCalls)
+        assertTrue(result.people.isEmpty())
+    }
+
+    @Test fun creatorPageLoadsOfficialProfileAndAllWorks() {
+        val cursors=mutableListOf<String>()
+        var workCalls=0
+        val repo=repository { request ->
+            when(request.url.encodedPath) {
+                "/reading/user/profile/get/v1/" -> {
+                    assertEquals("409",request.url.queryParameter("user_id"))
+                    """{"code":0,"data":{"ugc_user":{"user_id":"409",
+                        "base_info":{"user_name":"陈柯文化","expand_user_avatar":"https:\\u002F\\u002Fexample.com\\u002Fexpand.jpg",
+                        "description":"原创动漫出品方"},
+                        "user_tag":{"sub_title_list":[{"text":"出品方"}]},
+                        "user_relation":{"follow_user_num":4}}}}"""
+                }
+                "/novel/commentapi/user/profile/409/v1" -> {
+                    workCalls++
+                    assertEquals("api5-sinfnormal.fqnovel.com",request.url.host)
+                    assertEquals("POST",request.method)
+                    assertEquals("73932",request.url.queryParameter("version_code"))
+                    assertEquals("7.3.9.32",request.url.queryParameter("version_name"))
+                    assertEquals("1506",request.header("comment-source"))
+                    assertEquals("101",request.header("lc"))
+                    val body=okio.Buffer().also { request.body!!.writeTo(it) }.readUtf8()
+                    val json=JSONObject(body)
+                    assertEquals("409",json.optString("target_user_id"))
+                    assertEquals(23,json.optInt("tab_type"))
+                    assertEquals(22,json.optInt("sub_tab_type"))
+                    assertEquals("time_desc",json.optString("sort"))
+                    val cursor=json.optString("cursor")
+                    cursors+=cursor
+                    if(cursor.isEmpty()) """{"code":0,"data":{"hightlight":{"total":4,"name":"作品"},
+                        "common_list_info":{"cursor":"next-1","has_more":true},"data_list":[
+                        {"data_type":1,"video":{"video_id":"456","common":{"title":"作品一",
+                         "cover":"https:\\u002F\\u002Fexample.com\\u002Fone.jpg","intro":"简介一"},
+                         "expand":{"episode_cnt":12,"sub_title_list":[{"text":"年代"},{"text":"12集"}]}}},
+                        {"data_type":1,"video":{"video_id":"123","common":{"title":"当前剧集"},
+                         "expand":{"episode_cnt":4}}},
+                        {"data_type":1,"video":{"video_id":"bad","common":{"title":"无效"}}}
+                    ]}}"""
+                    else """{"code":0,"data":{"hightlight":{"total":0},
+                        "common_list_info":{"cursor":"{\"next_cursor\":null,\"has_more\":false}","has_more":false},"data_list":[
+                        {"data_type":1,"video":{"video_id":"789","common":{"title":"作品二"},
+                         "expand":{"episode_cnt":8}}},
+                        {"data_type":1,"video":{"video_id":"790","common":{"title":"作品三"},
+                         "expand":{"episode_cnt":6}}}
+                    ]}}"""
+                }
+                else -> error("unexpected ${request.url}")
+            }
+        }
+        val person=Person("409","陈柯文化","https://example.com/fallback.jpg","出品方",2,true)
+        val result=repo.creatorPage(person)
+        assertEquals("陈柯文化",result.name)
+        assertEquals("https://example.com/expand.jpg",result.avatar)
+        assertEquals("原创动漫出品方",result.description)
+        assertEquals(listOf("出品方"),result.roles)
+        assertEquals(4L,result.fans)
+        assertEquals(2,workCalls)
+        assertEquals(listOf("","next-1"),cursors)
+        assertEquals(listOf("456","123","789","790"),result.works.map { it.id })
+        assertEquals("作品一",result.works.first().title)
+        assertEquals("12集",result.works.first().badge)
+        assertEquals("年代",result.works.first().tags)
+        assertEquals("简介一",result.works.first().description)
+        assertThrows(IllegalArgumentException::class.java) { repo.creatorPage(person.copy(id="../bad")) }
+    }
 }

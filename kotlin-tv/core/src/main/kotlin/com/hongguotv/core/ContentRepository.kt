@@ -16,6 +16,7 @@ internal fun JSONObject.str(key: String) = if (isNull(key)) "" else optString(ke
 private const val SEARCH_API = "https://api5-normal-sinfonlinea.fqnovel.com/reading/bookapi/search/tab/v"
 private const val REGISTER_API = "https://log5-applog.fqnovel.com/service/2/device_register/"
 private const val COMMENT_API = "https://api5-normal-sinfonlineb.fqnovel.com/novel/commentapi/comment/list"
+private const val CREATOR_WORKS_API = "https://api5-sinfnormal.fqnovel.com/novel/commentapi/user/profile"
 const val DANMAKU_WINDOW = 30_000L
 const val DANMAKU_MAX_DURATION = 86_400_000L
 /** 官方搜索第一页只给 6 条（「综合」页），首页拼两页补足一屏。 */
@@ -27,7 +28,10 @@ data class Series(val id: String, val title: String, val cover: String = "", val
     fun toJson() = JSONObject().put("id",id).put("title",title).put("cover",cover).put("description",description).put("badge",badge).put("tags",tags)
     companion object { fun fromJson(o: JSONObject) = Series(o.str("id"),o.str("title"),o.str("cover"),o.str("description"),o.str("badge"),o.str("tags")) }
 }
-data class Detail(val series: Series, val episodes: List<String>)
+data class Person(val id: String, val name: String, val avatar: String = "", val role: String = "", val fans: Long = 0, val creator: Boolean = false)
+/** 作者/主创页：同一演员或出品方的简介与作品列表。 */
+data class CreatorPage(val id: String, val name: String, val avatar: String = "", val description: String = "", val roles: List<String> = emptyList(), val fans: Long = 0, val works: List<Series> = emptyList())
+data class Detail(val series: Series, val episodes: List<String>, val people: List<Person> = emptyList())
 data class RankPosition(val rank: Int?, val heat: String, val status: String = "")
 data class ComicRanking(val positions: Map<String,RankPosition>, val totalPages: Int, val updatedText: String)
 data class CatalogPage(val items: List<Series>, val hasMore: Boolean, val ranking: ComicRanking? = null, val genres: List<CatalogGenre> = emptyList())
@@ -38,11 +42,22 @@ class SearchSessionExpiredException: IOException("搜索结果已过期，请从
 class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectTimeout(15,TimeUnit.SECONDS).readTimeout(30,TimeUnit.SECONDS).callTimeout(45,TimeUnit.SECONDS).build(), private val clock: () -> Long = System::currentTimeMillis) {
     private val signer = Signer()
     private val site = "https://hongguoduanju.com"
+    /** 官方接口统一使用较新的版本号；网站接口仍沿用 [VendorConstants.device]。 */
+    private fun officialValues() = VendorConstants.device.toMutableMap().also {
+        for(k in listOf("version_code","manifest_version_code","update_version_code","pv_player")) it[k]="72232"
+        it["version_name"]="7.2.2.32"
+    }
+    /** 主页作品列表接口按版本号开量；旧版本会返回空列表，不能复用 [officialValues]。 */
+    private fun creatorWorksValues() = VendorConstants.device.toMutableMap().also {
+        for(k in listOf("version_code","manifest_version_code","update_version_code","pv_player")) it[k]="73932"
+        it["version_name"]="7.3.9.32"
+    }
     private data class SearchCursor(val searchId: String, val passback: String, val offset: Int?, val updatedAt: Long)
     private val searchCursors=linkedMapOf<Triple<ContentType,String,Int>,SearchCursor>()
-    private fun text(url: String, signed: Signer.Request? = null): String {
+    private fun text(url: String, signed: Signer.Request? = null, headers: Map<String,String> = emptyMap()): String {
         val request = Request.Builder().url(url).header("User-Agent",VendorConstants.VIDEO_UA).header("Accept-Language","zh-CN,zh;q=0.9")
         signed?.headers?.forEach { (k,v) -> request.header(k,v) }
+        headers.forEach { (k,v) -> request.header(k,v) }
         signed?.body?.let { request.post(it.toRequestBody("application/json; charset=utf-8".toMediaType())) }
         return RequestScope.execute(http.newCall(request.build())) { response ->
             if (!response.isSuccessful) throw IOException("内容请求失败（HTTP ${response.code}）")
@@ -62,6 +77,157 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
         return Series(o.str("series_id"),o.str("series_name").ifEmpty { o.str("series_title").ifEmpty { item.str("name") } },cleanUrl(o.str("series_cover")),o.str("series_intro"),o.str("episode_right_text").ifEmpty { if(count>0) "全 ${count} 集" else "" },(0 until minOf(tags.length(),5)).joinToString(" · ") { tags.optJSONObject(it)?.str("name") ?: tags.optString(it) })
     }
     private fun valid(rows: List<Series>) = rows.filter { it.id.matches(Regex("[0-9]{1,30}")) && it.title.isNotBlank() }.distinctBy { it.id }
+    /** 详情页的演员/主创；网站用 celebrity_id 打开同名角色页。 */
+    private fun people(o: JSONObject): List<Person> {
+        val raw=o.optJSONArray("celebrities") ?: return emptyList()
+        return (0 until raw.length()).mapNotNull { index ->
+            val item=raw.optJSONObject(index) ?: return@mapNotNull null
+            val id=item.str("celebrity_id"); val name=item.str("nickname")
+            if(!id.matches(Regex("[0-9]{1,30}")) || name.isBlank()) null
+            else Person(id,name,cleanUrl(item.str("avatar")),item.str("sub_title"))
+        }.distinctBy { it.id }
+    }
+    /**
+     * 官方详情接口的主创用户：网站的 `celebrities` 只覆盖演员，
+     * 漫剧/AI剧/漫画等分类通常只在这里给出出品方。
+     */
+    private fun officialCreators(id: String): List<Person> = runCatching {
+        val body=JSONObject().put("series_id",id).put("biz_param",JSONObject()
+            .put("video_id_type",1).put("source",5).put("detail_page_version",1)
+        ).toString().toByteArray(Charsets.UTF_8)
+        val signed=signer.sign("https://api5-normal-sinfonlinea.fqnovel.com/novel/player/video_detail/v1/",officialValues(),body)
+        val root=JSONObject(text(signed.url,signed))
+        if(root.optInt("code",-1)!=0) return@runCatching emptyList()
+        val users=root.optJSONObject("data")?.optJSONObject("video_data")?.optJSONArray("main_creator_users") ?: return@runCatching emptyList()
+        (0 until users.length()).mapNotNull { index ->
+            val item=users.optJSONObject(index) ?: return@mapNotNull null
+            val base=item.optJSONObject("base_info") ?: JSONObject()
+            val userId=item.str("user_id").ifEmpty { base.str("user_id") }
+            val name=base.str("user_name")
+            if(!userId.matches(Regex("[0-9]{1,30}")) || name.isBlank()) return@mapNotNull null
+            val roles=item.optJSONObject("user_tag")?.optJSONArray("sub_title_list")?.let { array ->
+                (0 until array.length()).mapNotNull { at -> array.optJSONObject(at)?.str("text")?.takeIf { it.isNotEmpty() } }
+            }.orEmpty()
+            val fans=item.optJSONObject("user_relation")?.optLong("follow_user_num",0) ?: 0
+            val avatar=base.str("expand_user_avatar").ifEmpty { base.str("user_avatar") }
+            Person(userId,name,cleanUrl(avatar),roles.joinToString(" · "),fans,true)
+        }.distinctBy { it.id }
+    }.getOrDefault(emptyList())
+    /** 角色页：网站 `/character/<id>`，直接复用详情卡片解析作品列表。 */
+    fun character(id: String): CreatorPage {
+        require(id.matches(Regex("[0-9]{1,30}")))
+        val page=router("$site/character/$id").optJSONObject("character_(id)/page") ?: throw IOException("作者页暂不可用")
+        val info=page.optJSONObject("userInfo") ?: JSONObject()
+        val name=info.str("user_name").ifEmpty { throw IOException("作者信息暂不可用") }
+        val roles=info.optJSONArray("subtitle_list")?.let { array ->
+            (0 until array.length()).mapNotNull { index -> array.optString(index).trim().takeIf { it.isNotEmpty() } }
+        }.orEmpty()
+        val raw=page.optJSONArray("videoList") ?: JSONArray()
+        val works=valid((0 until raw.length()).mapNotNull { index -> raw.optJSONObject(index)?.let(::card) })
+        return CreatorPage(info.str("person_id").ifEmpty { id },name,cleanUrl(info.str("user_avatar")),
+            cleanText(info.str("description")),roles,
+            info.optJSONObject("user_relation_info")?.optLong("fans_num",0) ?: 0,works)
+    }
+    private data class CreatorProfile(val name: String, val avatar: String, val description: String, val roles: List<String>, val fans: Long)
+    /** 官方用户资料：出品方/演员的资料页，和作品列表分开取。 */
+    private fun creatorProfile(userId: String): CreatorProfile? = runCatching {
+        val signed=signer.sign("https://api5-normal-sinfonlinea.fqnovel.com/reading/user/profile/get/v1/",
+            officialValues().also { it["user_id"]=userId })
+        val root=JSONObject(text(signed.url,signed))
+        if(root.optInt("code",-1)!=0) return@runCatching null
+        val data=root.optJSONObject("data") ?: return@runCatching null
+        val user=data.optJSONObject("ugc_user") ?: return@runCatching null
+        val base=user.optJSONObject("base_info") ?: JSONObject()
+        val name=base.str("user_name").ifBlank { return@runCatching null }
+        val roles=user.optJSONObject("user_tag")?.optJSONArray("sub_title_list")?.let { array ->
+            (0 until array.length()).mapNotNull { index -> array.optJSONObject(index)?.str("text")?.takeIf { it.isNotEmpty() } }
+        }.orEmpty()
+        val fans=user.optJSONObject("user_relation")?.optLong("follow_user_num",0)
+            ?: data.optJSONObject("user_relation")?.optLong("follow_user_num",0) ?: 0
+        CreatorProfile(name,cleanUrl(base.str("expand_user_avatar").ifEmpty { base.str("user_avatar") }),
+            cleanText(base.str("description")),roles,fans)
+    }.getOrNull()
+    /**
+     * 官方作者主页作品接口。和网站搜索不同，它按 user_id 返回该作者自己的全部作品，
+     * 不会混入同名关键词的其它剧集；首屏 40 条，之后用 cursor 翻页。
+     */
+    private fun creatorWorksPage(userId: String, cursor: String): JSONObject {
+        val body=JSONObject()
+            .put("comment_source",1506)
+            .put("count",18)
+            .put("cursor",cursor)
+            .put("extra_param",JSONObject())
+            .put("locate_post_id","")
+            .put("profile_user_type",0)
+            .put("sort","time_desc")
+            .put("sub_tab_type",22)
+            .put("tab_type",23)
+            .put("target_user_id",userId)
+            .toString().toByteArray(Charsets.UTF_8)
+        val signed=signer.sign("$CREATOR_WORKS_API/$userId/v1",creatorWorksValues(),body)
+        val root=JSONObject(text(signed.url,signed,mapOf(
+            "Accept" to "application/json; charset=utf-8,application/x-protobuf",
+            "comment-source" to "1506","lc" to "101")))
+        if(root.optInt("code",-1)!=0) throw IOException("作者作品暂不可用")
+        return root.optJSONObject("data") ?: throw IOException("作者作品暂不可用")
+    }
+    private fun creatorWork(item: JSONObject): Series? {
+        val video=item.optJSONObject("video") ?: return null
+        val common=video.optJSONObject("common") ?: return null
+        val id=video.str("video_id")
+        val title=cleanText(common.str("title"))
+        if(!id.matches(Regex("[0-9]{1,30}")) || title.isBlank()) return null
+        val expand=video.optJSONObject("expand") ?: JSONObject()
+        val count=expand.optInt("episode_cnt",0)
+        val subs=expand.optJSONArray("sub_title_list")
+        val texts=(0 until (subs?.length() ?: 0)).mapNotNull { index ->
+            subs?.optJSONObject(index)?.str("text")?.takeIf { it.isNotBlank() }
+        }
+        val badge=texts.firstOrNull { it.contains("集") } ?: if(count>0) "${count}集" else ""
+        val tags=texts.filter { !it.contains("集") }.take(3).joinToString(" · ")
+        return Series(id,title,cleanUrl(common.str("cover")),cleanText(common.str("intro")),badge,tags)
+    }
+    /**
+     * 逐页读取作者主页作品，直到 has_more=false 或空页；当前剧集也保留。
+     * 服务端每页条数不固定，不能按 offset 推算，必须原样回传 cursor。
+     */
+    private fun creatorWorks(userId: String): List<Series> {
+        val found=linkedMapOf<String,Series>()
+        var cursor=""
+        var page=0
+        while(page<100) {
+            var data: JSONObject?=null
+            for(attempt in 0 until 3) {
+                data=runCatching { creatorWorksPage(userId,cursor) }.getOrNull()
+                if(data!=null) break
+                // 偶发 5xx 时退避重试；cursor 不变，避免漏页。
+                if(attempt<2) Thread.sleep(300L*(attempt+1))
+            }
+            val current=data ?: throw IOException("作者作品暂不可用")
+            val rows=current.optJSONArray("data_list") ?: break
+            if(rows.length()==0) break
+            rows.objects().mapNotNull(::creatorWork).forEach { found[it.id]=it }
+            val info=current.optJSONObject("common_list_info") ?: break
+            val next=info.str("cursor")
+            if(next.isBlank() || next==cursor || !info.optBoolean("has_more",false)) break
+            cursor=next
+            page++
+            if(page<100) Thread.sleep(200)
+        }
+        return found.values.toList()
+    }
+    /** 漫剧/AI剧/漫画的出品方页：官方资料 + 官方作者主页的全部作品。 */
+    fun creatorPage(person: Person): CreatorPage {
+        require(person.id.matches(Regex("[0-9]{1,30}")))
+        val profile=creatorProfile(person.id)
+        val name=profile?.name?.ifBlank { person.name } ?: person.name
+        if(name.isBlank()) throw IOException("作者信息暂不可用")
+        val roles=profile?.roles?.ifEmpty { listOfNotNull(person.role.takeIf { it.isNotBlank() }) }
+            ?: listOfNotNull(person.role.takeIf { it.isNotBlank() })
+        return CreatorPage(person.id,name,profile?.avatar?.ifBlank { person.avatar } ?: person.avatar,
+            profile?.description.orEmpty(),roles,profile?.fans?.takeIf { it>0 } ?: person.fans,
+            creatorWorks(person.id))
+    }
     /** 热播榜：网站 `/rank/<榜单>?page=N`，名次与热度都用网站给出的值。 */
     fun ranking(board: RankBoard = RankBoard.HONGGUO, page: Int = 1): CatalogPage {
         require(page in 1..100)
@@ -138,9 +304,7 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
     }
     private data class SearchBatch(val items: List<Series>, val hasMore: Boolean, val cursor: SearchCursor)
     private fun searchBatch(keyword: String, page: Int, type: ContentType, cursor: SearchCursor?): SearchBatch {
-        val values=VendorConstants.device.toMutableMap()
-        for(k in listOf("version_code","manifest_version_code","update_version_code","pv_player")) values[k]="72232"
-        values["version_name"]="7.2.2.32"
+        val values=officialValues()
         values.putAll(linkedMapOf(
             "query" to keyword,"count" to "20","offset" to ((page-1)*20).toString(),"tab_type" to type.searchTab.toString(),
             "bookshelf_search_plan" to "4","use_correct" to "false","user_is_login" to "0","bookstore_tab" to "16",
@@ -235,7 +399,10 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
         val raw=o.optJSONArray("vid_list") ?: throw IOException("分集暂不可用")
         val episodes=(0 until raw.length()).map { raw.getString(it) }
         if(episodes.isEmpty() || episodes.any { !it.matches(Regex("[0-9]{1,30}")) } || episodes.distinct().size!=episodes.size) throw IOException("分集数据异常")
-        return Detail(card(o).copy(id=id),episodes)
+        val cast=people(o)
+        // 真人剧已有演员页时保持原行为；网站没有主创时才请求官方详情补出品方。
+        val creators=if(cast.isEmpty()) officialCreators(id) else emptyList()
+        return Detail(card(o).copy(id=id),episodes,cast.ifEmpty { creators })
     }
     fun stream(id: String, maxQuality: Int = 1080): StreamInfo {
         require(id.matches(Regex("[0-9]{1,30}")))
@@ -317,8 +484,8 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
     }
     private fun danmakuText(raw: String): String {
         val clean=raw.filter { it.code>=32 && it!='\u2028' && it!='\u2029' }.replace(Regex("\\s+")," ").trim()
-        val mapped=danmakuFaceText(clean)
-        return if(mapped.length>180) mapped.take(180)+"…" else mapped
+        // Keep the original `[偷笑]` placeholder; the renderer maps it to a Fluent Emoji image.
+        return if(clean.length>180) clean.take(180)+"…" else clean
     }
     companion object {
         fun extractRouter(html: String): JSONObject {

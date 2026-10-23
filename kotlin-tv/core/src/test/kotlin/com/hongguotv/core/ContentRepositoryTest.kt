@@ -419,6 +419,60 @@ class ContentRepositoryTest {
         assertEquals("饰 王妈",result.people.single().role)
     }
 
+    @Test fun detailLoadsOfficialRelatedWorksCell() {
+        var relatedCalls=0
+        val repo=repository { request ->
+            when(request.url.encodedPath) {
+                "/detail" -> """<script>_ROUTER_DATA={"loaderData":{"detail_page":{"seriesDetail":{
+                    "series_id":"123","series_name":"测试短剧","series_intro":"简介",
+                    "episode_cnt":12,"vid_list":["1","2"],
+                    "celebrities":[{"celebrity_id":"760","nickname":"王志欣"}]
+                }}}};</script>"""
+                "/reading/bookapi/plan/v:version/" -> {
+                    relatedCalls++
+                    assertEquals("GET",request.method)
+                    assertEquals("10",request.url.queryParameter("scene"))
+                    assertEquals("detail_page_more_related",request.url.queryParameter("from"))
+                    assertEquals("123",request.url.queryParameter("book_id"))
+                    assertEquals("73932",request.url.queryParameter("version_code"))
+                    assertEquals("101",request.header("lc"))
+                    """{"code":0,"data":[
+                        {"cell_name":"相关作品","show_type":547,"video_data":[
+                            {"series_id":"456","title":"爆笑修仙第二季","episode_cnt":12,
+                             "cover":"https:\\u002F\\u002Fexample.com\\u002Fb.jpg",
+                             "tag_info":{"text":"第2季"},
+                             "sub_title_list":[{"content":"玄幻脑洞","data_type":3},{"content":"45.1万次播放","data_type":16}]},
+                            {"series_id":"123","title":"当前剧集"},
+                            {"series_id":"999","title":"第十季预告","episode_cnt":0,
+                             "cover":"https:\\u002F\\u002Fexample.com\\u002Fpreview.jpg",
+                             "tag_info":{"text":"第10季"}},
+                            {"series_id":"bad","title":"无效"}
+                        ]},
+                        {"cell_name":"猜你喜欢","show_type":506,"video_data":[
+                            {"series_id":"789","title":"不应采用"}
+                        ]}
+                    ]}"""
+                }
+                else -> error("unexpected ${request.url}")
+            }
+        }
+        val result=repo.detail("123",includeRelated=true)
+        assertEquals(1,relatedCalls)
+        assertEquals(listOf("456","999"),result.related.map { it.id })
+        assertEquals("爆笑修仙第二季",result.related.first().title)
+        assertEquals("https://example.com/b.jpg",result.related.first().cover)
+        assertEquals("第2季",result.related.first().badge)
+        assertEquals("玄幻脑洞",result.related.first().tags)
+        assertFalse(result.related.first().preview)
+        assertEquals("第十季预告",result.related.last().title)
+        assertEquals("https://example.com/preview.jpg",result.related.last().cover)
+        assertEquals("第10季",result.related.last().badge)
+        assertTrue(result.related.last().preview)
+        assertTrue(Series.fromJson(result.related.last().toJson()).preview)
+        assertTrue(repo.detail("123").related.isEmpty())
+        assertEquals(1,relatedCalls)
+    }
+
     @Test fun characterPageParsesProfileAndSameCreatorWorks() {
         val repo=repository { request ->
             assertEquals("/character/760",request.url.encodedPath)

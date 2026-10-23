@@ -280,6 +280,7 @@ class MainActivity: Activity() {
     private var playError=false
     private var lastSaved=0L
     private var quality=""
+    private var feedQualityButton: TextView?=null
     private val tick=object: Runnable {
         override fun run() {
             if(!foreground || isDestroyed) return
@@ -1284,7 +1285,7 @@ class MainActivity: Activity() {
         detailFromCharacter=fromCharacter
         invalidatePage(); releaseCatalogViews(); screen="detail"; directPlayback=resume; detail=null; synopsisExpanded=false
         val body=base(series.title); message(body,"正在加载剧集…")
-        work({ repository.detail(series.id) }, { result ->
+        work({ repository.detail(series.id,includeRelated=true) }, { result ->
             detail=result; library.observeFavorite(series.id,result.episodes.size,System.currentTimeMillis(),acknowledge=true)
             val progress=library.progress(series.id)
             val target=ResumePlayback.target(result.episodes,progress?.episodeId,progress?.position ?: 0,progress?.completed==true)
@@ -1488,7 +1489,48 @@ class MainActivity: Activity() {
             repeat(10-numbers.size) { line.addView(Space(this),lp(0,dp(42)).apply { weight=1f; rightMargin=dp(6) }) }
             content.addView(line,lp(-1,dp(49)))
         }
-        episodes.forEachIndexed { i,v -> v.nextFocusLeftId=if(i%10==0) v.id else episodes[i-1].id; v.nextFocusRightId=if(i%10==9 || i==episodes.lastIndex) v.id else episodes[i+1].id; if(i>=10) v.nextFocusUpId=episodes[i-10].id; v.nextFocusDownId=if(i+10<episodes.size) episodes[i+10].id else v.id }
+        val relatedCards=mutableListOf<View>()
+        if(data.related.isNotEmpty()) {
+            content.addView(text("相关作品",18f).apply { setTypeface(null,Typeface.BOLD); setPadding(0,dp(18),0,dp(8)) })
+            val relatedScroll=HorizontalScrollView(this).apply {
+                isHorizontalScrollBarEnabled=false
+                isFocusable=false
+                descendantFocusability=ViewGroup.FOCUS_AFTER_DESCENDANTS
+            }
+            val relatedRow=row(); relatedRow.setPadding(0,dp(2),0,dp(2)); relatedScroll.addView(relatedRow,lp(-2,-2))
+            val visible=5; val gap=dp(14)
+            val width=((resources.displayMetrics.widthPixels*.9f-gap*(visible-1))/visible).toInt()
+            data.related.forEachIndexed { index,item ->
+                val card=column(); card.setPadding(dp(4),dp(4),dp(4),dp(9)); focusStyle(card)
+                card.contentDescription=item.title+(if(item.badge.isNotBlank()) " ${item.badge}" else "")+(if(item.preview) " 预告" else ""); card.tag=item.id
+                val artwork=FrameLayout(this); card.addView(artwork,lp(-1,((width-dp(8))/TvStyle.POSTER_ASPECT).toInt()))
+                val image=ImageView(this).apply { scaleType=ImageView.ScaleType.FIT_CENTER; importantForAccessibility=View.IMPORTANT_FOR_ACCESSIBILITY_NO }
+                artwork.addView(image,FrameLayout.LayoutParams(-1,-1)); loadCover(image,item.cover)
+                if(item.badge.isNotBlank()) {
+                    val badge=text(item.badge,12f,white).apply { gravity=Gravity.CENTER; setPadding(dp(8),dp(3),dp(8),dp(3)); background=rounded(Color.argb(178,0,0,0)) }
+                    artwork.addView(badge,FrameLayout.LayoutParams(-2,-2,Gravity.TOP or Gravity.END).apply { topMargin=dp(6); rightMargin=dp(6) })
+                }
+                if(item.preview) {
+                    val label=text("预告",12f,white).apply { gravity=Gravity.CENTER; setPadding(dp(8),dp(3),dp(8),dp(3)); background=rounded(Color.argb(178,0,0,0)) }
+                    artwork.addView(label,FrameLayout.LayoutParams(-2,-2,Gravity.BOTTOM or Gravity.START).apply { leftMargin=dp(6); bottomMargin=dp(6) })
+                }
+                card.addView(text(item.title,14f).apply { maxLines=2; minLines=2; ellipsize=TextUtils.TruncateAt.END; setPadding(dp(3),dp(7),dp(3),0) },lp(-1,-2).apply { weight=1f })
+                card.setOnClickListener {
+                    if(item.preview) Toast.makeText(this,"《${item.title}》尚未上线，暂不可播放",Toast.LENGTH_SHORT).show()
+                    else openDetail(item,false,true)
+                }
+                card.setOnFocusChangeListener { _,focused -> card.background=TvStyle.card(this,focused); if(focused) loadCover(image,item.cover) }
+                relatedRow.addView(card,lp(width,-1).apply { if(index<data.related.lastIndex) rightMargin=gap }); relatedCards+=card
+            }
+            content.addView(relatedScroll,lp(-1,-2))
+        }
+        episodes.forEachIndexed { i,v -> v.nextFocusLeftId=if(i%10==0) v.id else episodes[i-1].id; v.nextFocusRightId=if(i%10==9 || i==episodes.lastIndex) v.id else episodes[i+1].id; if(i>=10) v.nextFocusUpId=episodes[i-10].id; v.nextFocusDownId=if(i+10<episodes.size) episodes[i+10].id else relatedCards.firstOrNull()?.id ?: v.id }
+        relatedCards.forEachIndexed { index,card ->
+            card.nextFocusLeftId=if(index==0) card.id else relatedCards[index-1].id
+            card.nextFocusRightId=if(index==relatedCards.lastIndex) card.id else relatedCards[index+1].id
+            card.nextFocusUpId=episodes.lastOrNull()?.id ?: play.id
+            card.nextFocusDownId=card.id
+        }
         if(focusEpisode) episodes.getOrNull((episodeIndex-group*20).coerceIn(0,episodes.lastIndex))?.requestFocus() else play.requestFocus()
     }
     /** 详情页的「作者页」入口：一个人直接进入，多个人先选择。 */
@@ -1635,6 +1677,7 @@ class MainActivity: Activity() {
         startDanmaku(requestedId,data.series.id)
         work({ prefetched ?: RemoteVideo(repository.http,repository.stream(requestedId,maxQuality)).prepare() }, { remote ->
             video=remote; quality=remote.info.quality
+            feedQualityButton?.text="清晰度 ${currentQualityLabel()}"
             val p=player ?: run {
                 val load=DefaultLoadControl.Builder().setBufferDurationsMs(15000,30000,1000,2000).setTargetBufferBytes(12*1024*1024).build()
                 val renderers=androidx.media3.exoplayer.DefaultRenderersFactory(this).setEnableDecoderFallback(true)
@@ -1856,7 +1899,7 @@ class MainActivity: Activity() {
     private fun feedTagText(tags: String)=tags.split(" · ",",","，","/").map { it.trim() }.filter { it.isNotEmpty() }.take(5).joinToString("  ") { "#$it" }
     /** 推荐连播底部操作行：暂停播放 / 下一集 / 合集 / 追剧 / 倍速 / 清晰度 / 更多设置 / 换一批。 */
     private fun buildFeedActions(data: Detail) {
-        controls.removeAllViews()
+        controls.removeAllViews(); feedQualityButton=null
         val bar=HorizontalScrollView(this).apply { isHorizontalScrollBarEnabled=false; clipToPadding=false }
         val actions=row(); bar.addView(actions); controls.addView(bar,lp(-1,-2))
         transportPlay=addButton(actions,if(player?.playWhenReady==true) "暂停播放" else "继续播放") { togglePlayback(); hidePlaybackOverlay() }
@@ -1875,11 +1918,12 @@ class MainActivity: Activity() {
         danmakuButton=addButton(actions,if(danmakuEnabled) "弹幕开" else "弹幕关") { toggleDanmaku() }
         lateinit var speed: TextView
         speed=addButton(actions,"倍速 ${PlaybackSpeed.label(library.playbackSpeed)}") { showSpeedPicker(speed) }
-        lateinit var quality: TextView
-        quality=addButton(actions,"清晰度 ${library.maxQuality}P") { showQualityPicker(quality,true) }
+        lateinit var qualityAction: TextView
+        qualityAction=addButton(actions,"清晰度 ${currentQualityLabel()}") { showQualityPicker(qualityAction,true) }
+        feedQualityButton=qualityAction
         lateinit var more: TextView
         more=addButton(actions,"更多设置") {
-            tvTools.choose("播放设置",listOf("倍速 ${PlaybackSpeed.label(library.playbackSpeed)}","清晰度 ${library.maxQuality}P","画面 ${library.frameMode.label}","定时 ${sleepTimer.label()}","弹幕设置","从头播放"),more,{ choice ->
+            tvTools.choose("播放设置",listOf("倍速 ${PlaybackSpeed.label(library.playbackSpeed)}","清晰度 ${currentQualityLabel()}","画面 ${library.frameMode.label}","定时 ${sleepTimer.label()}","弹幕设置","从头播放"),more,{ choice ->
                 main.post {
                     if(screen=="player" && more.isAttachedToWindow) when(choice) {
                         0 -> showSpeedPicker(more)
@@ -2052,7 +2096,7 @@ class MainActivity: Activity() {
         danmakuButton=addButton(options,if(danmakuEnabled) "弹幕开" else "弹幕关") { toggleDanmaku() }
         lateinit var more: TextView
         more=addButton(options,"播放设置") {
-            tvTools.choose("播放设置",listOf("倍速 ${PlaybackSpeed.label(library.playbackSpeed)}","清晰度 ${library.maxQuality}P","画面 ${library.frameMode.label}","定时 ${sleepTimer.label()}","弹幕设置","从头播放"),more,{ choice ->
+            tvTools.choose("播放设置",listOf("倍速 ${PlaybackSpeed.label(library.playbackSpeed)}","清晰度 ${currentQualityLabel()}","画面 ${library.frameMode.label}","定时 ${sleepTimer.label()}","弹幕设置","从头播放"),more,{ choice ->
                 main.post {
                     if(screen=="player" && more.isAttachedToWindow) when(choice) {
                         0 -> showSpeedPicker(more)
@@ -2086,13 +2130,16 @@ class MainActivity: Activity() {
         }
         dialog.show(); dialog.listView.setSelection(selected); dialog.listView.requestFocus()
     }
+    /** 实际片源清晰度；还没取到地址时先显示本次请求的上限。 */
+    private fun currentQualityLabel(): String = quality.trim().ifEmpty { "${qualityCap ?: library.maxQuality}P" }
     private fun showQualityPicker(anchor: TextView,inPlayer: Boolean) {
         val options=PlaybackQuality.options
-        val dialog=AlertDialog.Builder(this).setTitle("全局默认清晰度")
+        val title=if(inPlayer) "全局默认清晰度 · 当前 ${currentQualityLabel()}" else "全局默认清晰度"
+        val dialog=AlertDialog.Builder(this).setTitle(title)
             .setSingleChoiceItems(options.map { "${it}P" }.toTypedArray(),options.indexOf(library.maxQuality)) { popup,index ->
                 val target=options[index]; val changed=library.maxQuality!=target || qualityCap!=null
                 library.maxQuality=target; qualityCap=null; qualityCapKey=""; autoFallbackTried=false; popup.dismiss()
-                if(anchor.tag!="playback-settings") anchor.text=(if(inPlayer) "清晰度 " else "默认清晰度  ·  ")+"${target}P"
+                if(!inPlayer) anchor.text="默认清晰度  ·  ${target}P"
                 if(inPlayer && changed) playEpisode(episodeIndex,currentPosition(),player?.playWhenReady ?: requestedAutoplay)
             }.setNegativeButton("取消",null).create()
         dialog.setOnDismissListener { if(anchor.isAttachedToWindow) anchor.requestFocus() }

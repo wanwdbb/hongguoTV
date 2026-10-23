@@ -17,6 +17,7 @@
 | --- | --- | --- | --- |
 | 网站内容页（首页/分类/榜单/详情/搜索兜底） | `https://hongguoduanju.com` | GET | 无，带 App UA |
 | App 搜索 | `https://api5-normal-sinfonlinea.fqnovel.com/reading/bookapi/search/tab/v` | GET | 签名 + 设备参数 |
+| 详情页相关作品 | `https://api5-normal-sinfonlinec.fqnovel.com/reading/bookapi/plan/v:version/` | GET | 签名 + 设备参数 |
 | 设备注册 | `https://log5-applog.fqnovel.com/service/2/device_register/` | POST JSON | 无签名，固定查询参数 |
 | 播放信息 | `https://api5-normal-sinfonlineb.fqnovel.com/novel/player/multi_video_model/preload/v1/` | POST JSON | 签名 + 设备参数 |
 | 播放地址明细 | 播放信息里的 `fallback_api`（临时地址） | GET | 无签名 |
@@ -229,7 +230,8 @@ GET https://hongguoduanju.com/detail?series_id={剧集ID}
 - `vid_list` 是分集视频 ID 数组（顺序即第 1 集、第 2 集…），必须非空、全为数字、无重复；
 - 剧集字段：`series_id`、`series_name`、`series_cover`、`series_intro`、`episode_right_text`、`tags[].name`（或 `category_list`）；
 - `celebrities[]` 是演员/主创：`celebrity_id`、`nickname`、`avatar`、`sub_title`，用于详情页的「作者页」入口；
-- `celebrities` 为空时，再调用「4.3 官方详情主创」补出品方；真人剧已有演员时不会多发这次请求。
+- `celebrities` 为空时，再调用「4.3 官方详情主创」补出品方；真人剧已有演员时不会多发这次请求；
+- 详情页的「相关作品」由官方接口补充，见「4.3.3 详情页相关作品」；该接口失败时详情页仍正常显示，只是隐藏相关作品区块。
 
 ### 3.5 演员/主创页（网站角色页）
 
@@ -477,6 +479,28 @@ GET https://api5-normal-sinfonlinea.fqnovel.com/reading/user/profile/get/v1/?{�
 - `user_tag.sub_title_list[].text`：角色标签；
 - `user_relation.follow_user_num`：粉丝数；
 - 资料名称缺失时，作者页退回官方详情里的 `base_info.user_name`。
+
+#### 4.3.3 详情页相关作品
+
+```
+GET https://api5-normal-sinfonlinec.fqnovel.com/reading/bookapi/plan/v:version/?{签名参数}
+  &scene=10
+  &from=detail_page_more_related
+  &book_id={剧集ID}
+  &device_level=3
+  &limit=0
+  &offset=0
+  &pad_column_detail=4
+  &session_uuid={随机 UUID}
+```
+
+- 必须使用 `version_code=73932`、`version_name=7.3.9.32`，旧版本不会返回相关作品；
+- `book_id` 与网站详情的 `series_id` 相同；`from=detail_page_more_related` 决定返回详情页的关联片单；
+- 取 `data[]` 中 `cell_name="相关作品"`（或 `show_type=547`）的 cell；
+- 卡片在 `video_data[]`：`series_id`（打开详情用）、`title`、`cover`、`tag_info.text`（如「第2季」）、`sub_title_list[].content`（题材/播放量）；
+- 解析时按 `series_id` 去重、过滤当前剧集和无效 ID；没有该 cell 时返回空列表；
+- 没有可播放分集的预告条目（`vid` 为空且 `episode_cnt<=0`）保留在片单里并标记「预告」，点击只提示未上线，不进入详情；
+- 接口失败不能阻断详情页，捕获异常后按「没有相关作品」处理。
 
 ### 4.4 播放信息与播放地址
 

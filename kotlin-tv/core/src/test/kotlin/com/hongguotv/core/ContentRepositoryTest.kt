@@ -515,10 +515,12 @@ class ContentRepositoryTest {
                         {"user_id":"bad","base_info":{"user_name":"无效"}}
                     ]}}}"""
                 }
-                else -> error("unexpected ${request.url}")
+                else -> "{\"code\":0,\"data\":{}}"
             }
         }
-        val result=repo.detail("123")
+        val basic=repo.detail("123")
+        assertEquals(0,officialCalls)
+        val result=repo.enrichDetail(basic)
         assertEquals(1,officialCalls)
         assertEquals(listOf("409"),result.people.map { it.id })
         assertEquals("陈柯文化",result.people.single().name)
@@ -538,10 +540,12 @@ class ContentRepositoryTest {
                     officialCalls++
                     """{"code":0,"data":{"video_data":{"series_id":"123"}}}"""
                 }
-                else -> error("unexpected ${request.url}")
+                else -> "{\"code\":0,\"data\":{}}"
             }
         }
-        val result=repo.detail("123")
+        val basic=repo.detail("123")
+        assertEquals(0,officialCalls)
+        val result=repo.enrichDetail(basic)
         assertEquals(1,officialCalls)
         assertTrue(result.people.isEmpty())
     }

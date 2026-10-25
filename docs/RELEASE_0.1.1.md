@@ -4,7 +4,7 @@
 
 ## 下载与部署
 
-[GitHub v0.1.1 Release](https://github.com/N3urda/hongguoTV/releases/tag/v0.1.1) 提供 APK、源码、Docker 部署包、验证证据与 SHA256SUMS。内容服务镜像为 `ghcr.io/n3urda/hongguotv-bridge:0.1.1`，提供 AMD64 / ARM64；本版服务协议兼容 0.1.0。
+[GitHub v0.1.1 Release](https://github.com/wanwdbb/hongguoTV/releases/latest) 提供 APK、源码、Docker 部署包、验证证据与 SHA256SUMS。内容服务镜像为 `ghcr.io/n3urda/hongguotv-bridge:0.1.1`，提供 AMD64 / ARM64；本版服务协议兼容 0.1.0。
 
 ```sh
 adb install -r hongguotv-0.1.1-android8.apk

@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useReducer, useRef } from "react";
 import { ContentProvider, mergePage, Series } from "../domain/model";
 
+import { CatalogCache } from "./catalogCache";
+
 type Page = {
   items: Series[];
   page: number;
@@ -22,7 +24,7 @@ export function useCatalog(
   query: string | null,
   enabled: boolean
 ) {
-  const cache = useMemo(() => new Map<string, Page>(), [provider]);
+  const cache = useMemo(() => new CatalogCache<Page>(), [provider]);
   const key = query === null ? "home" : `search:${query}`;
   const [, redraw] = useReducer((n: number) => n + 1, 0);
   const alive = useRef(true);
@@ -35,7 +37,7 @@ export function useCatalog(
   const entry = cache.get(key) ?? empty();
   async function load(replace = false) {
     const previous = cache.get(key) ?? empty();
-    if (previous.busy) return;
+    if (previous.busy || (!replace && !previous.more)) return;
     const next = { ...previous, busy: true, error: "" };
     cache.set(key, next);
     redraw();
@@ -46,7 +48,7 @@ export function useCatalog(
           ? await provider.home(page)
           : await provider.search(query, page);
       Object.assign(next, {
-        items: replace ? rows : mergePage(previous.items, rows),
+        items: (replace ? rows : mergePage(previous.items, rows)).slice(-300),
         page,
         more: rows.length > 0,
       });
@@ -54,6 +56,7 @@ export function useCatalog(
       next.error = e instanceof Error ? e.message : "内容加载失败";
     } finally {
       next.busy = false;
+      cache.set(key, next);
       if (alive.current) redraw();
     }
   }

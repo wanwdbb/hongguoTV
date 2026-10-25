@@ -56,6 +56,24 @@ class LibraryIndex(data: BackupData, updates: Map<String, FavoriteUpdate> = empt
         historyRows.forEach { progressById[it.series.id] = it }
         return true
     }
+    /** Remote timestamps are preserved; importing a cloud record never creates a new local watch event. */
+    fun mergeRemote(rows: List<AccountHistoryItem>): List<BackupProgress> {
+        val changed=mutableListOf<BackupProgress>()
+        rows.sortedBy { it.readAt }.forEach { row ->
+            val old=progressById[row.series.id]
+            if(row.readAt<=0 || row.episodeId.isBlank() || row.readAt<=(old?.updatedAt ?: 0L)) return@forEach
+            val same=old?.episodeId==row.episodeId
+            val metadata=if(row.series.title.isBlank()) old?.series ?: row.series else row.series
+            val position=row.position.coerceAtLeast(0)
+            val next=BackupProgress(metadata,row.episodeId,row.episodeIndex.coerceAtLeast(0),position,
+                row.duration.takeIf { it>0 } ?: if(same) old!!.duration else 0,
+                same && old!!.completed && old.position==position,row.readAt)
+            historyRows=(listOf(next)+historyRows.filterNot { it.series.id==row.series.id }).sortedByDescending { it.updatedAt }.take(200)
+            progressById.clear(); historyRows.forEach { progressById[it.series.id]=it }
+            setWatched(row.series.id,false); changed+=next
+        }
+        return changed
+    }
     fun setWatched(id: String, value: Boolean): Boolean {
         if (watched(id) == value) return false
         watchedIds = if (value) watchedIds + id else watchedIds - id

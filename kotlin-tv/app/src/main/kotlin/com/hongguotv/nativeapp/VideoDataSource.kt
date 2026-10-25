@@ -26,7 +26,7 @@ class VideoDataSource(private val video: RemoteVideo): BaseDataSource(true) {
         if(remaining==0L) return C.RESULT_END_OF_INPUT
         if(offset>=buffer.size) { buffer=video.read(position,minOf(512*1024L,remaining).toInt()); offset=0 }
         if(buffer.isEmpty()) throw java.io.EOFException("视频分段意外结束")
-        val count=minOf(length,buffer.size-offset,remaining.toInt())
+        val count=minOf(length.toLong(),(buffer.size-offset).toLong(),remaining).toInt()
         buffer.copyInto(target,targetOffset,offset,offset+count); offset+=count; position+=count; remaining-=count; bytesTransferred(count); return count
     }
     override fun getUri()=uri

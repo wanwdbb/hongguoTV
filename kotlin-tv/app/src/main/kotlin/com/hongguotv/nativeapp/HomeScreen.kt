@@ -99,9 +99,19 @@ class HomeScreen(
 
     fun render(shelves: List<Shelf>,focus: String,requestFocus: Boolean,more: (() -> Unit)?,position: Position?=null) {
         val previous=position ?: if(rows.isNotEmpty()) capturePosition() else null
+        val oldShelves=this.shelves.associateBy { it.key }
+        val oldRows=rows.associateBy { it.key }
         this.shelves=shelves; footerMore=more; revision++; val ticket=revision; restoring=true
-        contents.removeAllViews(); rows.clear(); cards.clear(); moreButton=null; lastRow=null
+        rows.clear(); cards.clear(); moreButton=null; lastRow=null
+        val retained=mutableSetOf<View>()
         shelves.filter { it.entries.isNotEmpty() || it.more!=null }.forEach { shelf ->
+            val old=oldRows[shelf.key]
+            if(old!=null && oldShelves[shelf.key]?.let { previous -> previous.title==shelf.title && previous.entries==shelf.entries && (previous.more!=null)==(shelf.more!=null) }==true) {
+                val index=rows.size
+                if(contents.indexOfChild(old.block)!=index) { contents.removeView(old.block); contents.addView(old.block,index) }
+                retained+=old.block; rows+=old; old.cards.forEach { cards[it.key]=it }
+                return@forEach
+            }
             val block=LinearLayout(context).apply { orientation=VERTICAL }
             val heading=LinearLayout(context).apply { orientation=HORIZONTAL; gravity=Gravity.CENTER_VERTICAL; setPadding(dp(2),dp(4),dp(2),dp(9)) }
             heading.addView(View(context).apply { background=TvStyle.shape(context,accent,radius=2) },LayoutParams(dp(3),dp(14)).apply { rightMargin=dp(8) })
@@ -124,7 +134,7 @@ class HomeScreen(
                 view.addView(title); view.addView(badge); view.addView(progress,LayoutParams(-1,dp(3)).apply { topMargin=dp(4) })
                 val card=Card(key,view,image,title,badge,progress,entry)
                 view.contentDescription=entry?.let { "${shelf.title}，${it.series.title}，${it.label}" } ?: "查看全部${shelf.title}"
-                view.setOnClickListener { lastFocus=key; remember(key); card.entry?.let { open(it.series,it.resume) } ?: moreAction?.invoke() }
+                view.setOnClickListener { lastFocus=key; remember(key); card.entry?.let { open(it.series,it.resume) } ?: this@HomeScreen.shelves.firstOrNull { it.key==shelf.key }?.more?.invoke() }
                 if(entry!=null) {
                     view.setOnLongClickListener { lastFocus=key; remember(key); card.entry?.let { actions(it.series,view) }; true }
                     view.setOnKeyListener { _,code,event -> if(code==KeyEvent.KEYCODE_MENU) { if(event.action==KeyEvent.ACTION_UP) { lastFocus=key; remember(key); card.entry?.let { actions(it.series,view) } }; true } else false }
@@ -135,7 +145,7 @@ class HomeScreen(
                         lastFocus=key; remember(key); card.entry?.let { selected(it.series,it.label) }
                         if(!restoring) {
                             loadNearbySelection()
-                            if(lastRow!=shelf.key) scroll.post { if(revision==ticket && view.hasFocus()) reveal(block) }
+                            if(lastRow!=shelf.key) { val focusRevision=revision; scroll.post { if(revision==focusRevision && view.hasFocus()) reveal(block) } }
                         }
                         lastRow=shelf.key
                     }
@@ -144,8 +154,9 @@ class HomeScreen(
             }
             shelf.entries.forEach { addCard(it) }
             shelf.more?.let { action -> addCard(null,action) }
-            contents.addView(block,LayoutParams(-1,-2).apply { bottomMargin=dp(16) }); rows+=Row(shelf.key,block,horizontal,rowCards)
+            contents.addView(block,rows.size,LayoutParams(-1,-2).apply { bottomMargin=dp(16) }); retained+=block; rows+=Row(shelf.key,block,horizontal,rowCards)
         }
+        (contents.childCount-1 downTo 0).forEach { index -> if(contents.getChildAt(index) !in retained) contents.removeViewAt(index) }
         if(cards.isEmpty()) contents.addView(label("还没有本机记录，热门剧加载后可选择观看。",15f).apply { setPadding(0,dp(16),0,dp(16)) })
         contents.addView(refresh,LayoutParams(-1,-2).apply { topMargin=dp(10) })
         val footer=mutableListOf<View>(refresh)
@@ -225,7 +236,7 @@ class HomeScreen(
         val ticket=revision
         fun start() {
             card.pending=false
-            if(ticket!=revision || !image.isAttachedToWindow || image.width<=0 || image.height<=0) return
+            if(cards[card.key]!==card || !image.isAttachedToWindow || image.width<=0 || image.height<=0) return
             loadCover(image,card.entry!!.series.cover)
         }
         if(image.isLaidOut && !image.isLayoutRequested) start()

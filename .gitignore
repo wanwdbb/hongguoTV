@@ -29,6 +29,7 @@ keystore.properties
 /downloads/
 /tmp/
 *.syn
+*.har
 
 # Delivery artifacts, native intermediates, local runtime
 /outputs/

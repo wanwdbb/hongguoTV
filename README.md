@@ -2,9 +2,9 @@
 
 当前分支提供 **Kotlin 原生独立 APK**：安装后联网即可使用，无需 Node / Docker。最低 Android 8.0，电视遥控器操作。
 
-**[下载原生版 APK](https://github.com/N3urda/hongguoTV-updates/releases/latest)** · [原生版说明与构建](kotlin-tv/README.md)
+**[下载原生版 APK](https://github.com/wanwdbb/hongguoTV/releases/latest)** · [原生版说明与构建](kotlin-tv/README.md)
 
-0.9.0 增加应用内更新：推送原生代码后自动同步至公开发布仓库、构建签名 APK；电视在浏览时检查并下载新版，确认系统安装即可，无需逐次传文件。播放中不检查，覆盖安装保留本机记录。见 [自动更新说明](kotlin-tv/AUTO_UPDATES.md)。
+0.9.0 增加应用内更新：向统一仓库 main 推送原生代码后自动构建签名 APK；电视在浏览时检查并下载新版，确认系统安装即可，无需逐次传文件。播放中不检查，覆盖安装保留本机记录。见 [自动更新说明](kotlin-tv/AUTO_UPDATES.md)。
 
 原生工程位于 `kotlin-tv/`，包名 `com.hongguotv.nativeapp`，可与旧版并存。以下为保留的 React Native 版说明。
 
@@ -12,7 +12,7 @@
 
 用于自家电视的非官方红果短剧客户端。首版采用 **React Native TV + TypeScript**，最低 Android 8.0（API 26）。电视负责界面和播放，独立 Node 服务负责内容接入与媒体分段处理，便于后续其他平台复用。
 
-**下载：[v0.1.1 APK、源码及 Docker 部署包](https://github.com/N3urda/hongguoTV/releases/tag/v0.1.1)** · [Docker 部署指南](docs/DOCKER.md)
+**下载：[v0.1.1 APK、源码及 Docker 部署包](https://github.com/wanwdbb/hongguoTV/releases/tag/v0.1.1)** · [Docker 部署指南](docs/DOCKER.md)
 
 ## 当前功能
 

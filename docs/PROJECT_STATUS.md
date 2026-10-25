@@ -1,6 +1,12 @@
 # 项目现状
 
-更新日期：2026-09-21。
+更新日期：2026-10-25。
+
+## 当前交付
+
+当前主客户端为 kotlin-tv 原生 Android TV 0.9.0，无需用户部署 Node 服务。下载与更新入口统一为 [wanwdbb/hongguoTV](https://github.com/wanwdbb/hongguoTV/releases/latest)。已完成本地优化、Pets 签名构建和模拟器安装播放；未推送或发布。账号观看记录写回与同源测试版云端回读已验证，本轮正式包保留登录后，已验证观看历史与独立续播接口同时回读第 2 集、16784ms，待同步 0；其他客户端界面仍需刷新核对。详细证据见 outputs/optimization-verification.md，具体优化见 [优化说明](OPTIMIZATION.md)。
+
+以下 v0.1.x 内容为历史 RN/服务端交付记录，不代表当前主客户端依赖。
 
 ## 已确认范围
 

@@ -4,7 +4,7 @@ Docker 运行独立内容服务，电视安装 APK 后连接它。目标为家�
 
 ## 使用源码或 Docker 部署包
 
-从 [v0.1.1 Release](https://github.com/N3urda/hongguoTV/releases/tag/v0.1.1) 下载 `hongguotv-0.1.1-docker.zip` 并解压，也可以克隆完整仓库。在解压后的根目录执行：
+从 [v0.1.1 Release](https://github.com/wanwdbb/hongguoTV/releases/latest) 下载 `hongguotv-0.1.1-docker.zip` 并解压，也可以克隆完整仓库。在解压后的根目录执行：
 
 ```sh
 cp .env.example .env

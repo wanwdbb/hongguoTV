@@ -4,8 +4,9 @@
 
 对应实现主要在：
 
-- `core/src/main/kotlin/com/hongguotv/core/ContentRepository.kt`：网站页面、搜索、设备注册、播放信息、弹幕
+- `core/src/main/kotlin/com/hongguotv/core/ContentRepository.kt`：网站页面、搜索、设备注册、扫码登录、账号资料、播放信息、弹幕
 - `core/src/main/kotlin/com/hongguotv/core/Signer.kt`：App 接口签名
+- `app/src/main/kotlin/com/hongguotv/nativeapp/AuthStore.kt`：登录会话的本地存档
 - `core/src/main/kotlin/com/hongguotv/core/MediaCrypto.kt`：播放地址与视频分片解密
 - `core/src/main/kotlin/com/hongguotv/core/RemoteVideo.kt`：视频 Range 读取
 - `core/src/main/kotlin/com/hongguotv/core/AppUpdates.kt`：自动更新
@@ -19,6 +20,14 @@
 | App 搜索 | `https://api5-normal-sinfonlinea.fqnovel.com/reading/bookapi/search/tab/v` | GET | 签名 + 设备参数 |
 | 详情页相关作品 | `https://api5-normal-sinfonlinec.fqnovel.com/reading/bookapi/plan/v:version/` | GET | 签名 + 设备参数 |
 | 设备注册 | `https://log5-applog.fqnovel.com/service/2/device_register/` | POST JSON | 无签名，固定查询参数 |
+| 获取登录二维码 | `https://hongguoduanju.com/passport/web/get_qrcode/` | GET | 无，网页 Cookie |
+| 轮询扫码状态 | `https://hongguoduanju.com/passport/web/check_qrconnect/` | GET | 网页 Cookie + 二维码 token |
+| 扫码登录落地 | 状态响应里的 `redirect_url`（官方地址） | GET | 扫码会话 Cookie |
+| 账号资料刷新 | `https://api5-normal-sinfonlineb.fqnovel.com/reading/user/info/v` | GET | 签名 + 登录 Cookie |
+| 账号观看记录 | `https://api5-normal-sinfonlineb.fqnovel.com/reading/bookapi/read_history/list/v` | GET | 签名 + 登录 Cookie |
+| 账号短剧收藏 | `https://api5-normal-sinfonlineb.fqnovel.com/reading/bookapi/bookshelf/video/list/v` | GET | 签名 + 登录 Cookie |
+| 账号预约列表 | `https://api5-normal-sinfonlineb.fqnovel.com/reading/user/subscribe/list/v1/` | GET | 签名 + 登录 Cookie |
+| 预约/取消预约 | `https://api5-normal-sinfonlineb.fqnovel.com/reading/bookapi/search/uncover_subscribe/v:version/` | POST JSON | 签名 + 登录 Cookie |
 | 播放信息 | `https://api5-normal-sinfonlineb.fqnovel.com/novel/player/multi_video_model/preload/v1/` | POST JSON | 签名 + 设备参数 |
 | 播放地址明细 | 播放信息里的 `fallback_api`（临时地址） | GET | 无签名 |
 | 弹幕 | `https://api5-normal-sinfonlineb.fqnovel.com/novel/commentapi/comment/list/{video_id}/v1/` | POST JSON | 签名 + 设备参数 |
@@ -45,8 +54,9 @@
 UA 取值：
 
 ```
-VIDEO_UA = com.phoenix.read/71332 (Linux; U; Android 16; zh_CN; 25053RT47C; Build/BP2A.250605.031.A3; Cronet/TTNetVersion:04657795 2026-01-23 QuicVersion:c67e9834 2025-09-08)
-APP_UA   = com.phoenix.read/72232 (Linux; U; Android 16; zh_CN; 25053RT47C; Build/BP2A.250605.031.A3)
+VIDEO_UA    = com.phoenix.read/71332 (Linux; U; Android 16; zh_CN; 25053RT47C; Build/BP2A.250605.031.A3; Cronet/TTNetVersion:04657795 2026-01-23 QuicVersion:c67e9834 2025-09-08)
+APP_UA      = com.phoenix.read/72232 (Linux; U; Android 16; zh_CN; 25053RT47C; Build/BP2A.250605.031.A3)
+QR_UA       = Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36
 ```
 
 ### 2.2 设备身份
@@ -95,6 +105,8 @@ App 首次启动时后台调用一次设备注册（见 4.1），成功后写入
 | `x-vc-bdturing-sdk-version` | 有请求体时 `3.7.2.cn` |
 | `x-ss-stub` | 有请求体时 `MD5(body)` 的大写十六进制 |
 
+扫码登录使用红果网页 Passport 接口，不走 App 签名；请求带浏览器 UA、Referer 和网页 Cookie，见 4.6。
+
 ### 2.4 默认设备参数
 
 `VendorConstants.device` 会被拼进搜索、播放、弹幕接口的查询串：
@@ -141,6 +153,19 @@ App 首次启动时后台调用一次设备注册（见 4.1），成功后写入
 - 页面结构变化 → 「内容数据结构已变化」「xx格式已变化」等；
 - 播放地址不是 http/https → 「播放地址格式异常」；
 - 所有错误信息都直接显示在电视界面上，不暴露原始 JSON。
+
+### 2.6 登录会话
+
+登录使用红果网页的二维码流程，具体请求见 4.6。客户端侧约定：
+
+- 二维码由 `get_qrcode` 返回，图片是 PNG data URI；二维码 token 只留在 `ContentRepository`，不交给界面、不写日志；
+- 界面每 2 秒调用一次 `check_qrconnect`，状态为 `new` / `scanned` / `confirmed` / `expired`；
+- 扫码确认后跟随官方 `redirect_url` 落地，收集二维码会话的全部 Cookie，再读取账号资料；
+- 响应里的全部 `Set-Cookie` 与 `X-Tt-Token` 会合并进会话，包括 `sessionid`、`sid_guard`、`uid_tt`、`sid_tt`、`d_ticket` 等；
+- 会话只附加到 `*.fqnovel.com` 官方接口，不会发给网站页面或 CDN；之后请求带 `Cookie` 与 `X-Tt-Token`；
+- 账号资料接口暂时不可用时保留一个不含昵称的本地会话，界面显示通用登录提示；只有服务端明确未登录/过期才清空；
+- 会话保存在应用私有 SharedPreferences `native-auth-v1`，不写日志、不出现在错误提示或提交文件里；
+- 登录失败只影响账号页，匿名浏览、搜索、详情和播放继续可用；退出登录或确认会话失效时才清空存档。
 
 ## 3. 网站页面接口
 
@@ -700,6 +725,173 @@ version_name=7.3.5.32
 - 快进/拖动后会从新位置重新取段；
 - 同 3 秒内相同文本合并为「文字 ♥ N」（`DanmakuPage.merge`）；
 - 关掉弹幕后不再请求、不再绘制，开关保存在 `native-player-v1` 的 `danmaku`。
+
+### 4.6 扫码登录
+
+代码位置：`ContentRepository.createLoginQr()`、`pollLoginQr()`、`refreshUser()`；会话存档在 `app` 模块的 `AuthStore`。原手机号验证码接口已移除。
+
+#### 4.6.1 获取二维码
+
+```
+GET https://hongguoduanju.com/passport/web/get_qrcode/?{查询参数}
+User-Agent: QR_UA
+Accept: application/json, text/plain, */*
+Accept-Language: zh-CN,zh;q=0.9
+Referer: https://hongguoduanju.com/
+```
+
+查询参数：
+
+| 参数 | 值 |
+| --- | --- |
+| `aid` | `513755`（红果网页） |
+| `next` / `request_host` | `https://hongguoduanju.com/` |
+| `language` | `zh` |
+| `account_sdk_source` | `web` |
+| `passport_jssdk_version` / `p_js_v` | `2.4.13` |
+| `passport_jssdk_type` | `normal` |
+| `is_from_ttaccountsdk` | `1` |
+| `p_js_t` / `p_zt` / `p_ver` / `p_bd` | `pro` / `3.3.5` / `1.0.29` / `1.0.1.20` |
+
+网页捕获里还有 `account_sdk_source_info`、`msToken`、`a_bogus`；当前客户端不需要这些反爬字段也能取到二维码。响应 `data`：
+
+| 字段 | 说明 |
+| --- | --- |
+| `token` | 一次性二维码 token，只用于后续轮询 |
+| `qrcode` | PNG data URI，直接交给界面显示 |
+| `expire_time` | 秒级过期时间 |
+| `qrcode_index_url` | 手机扫码后的落页地址，含 token，不写入界面 |
+
+`token`、`qrcode_index_url` 和图片内容都按登录凭据处理，不写日志或错误提示。
+
+#### 4.6.2 轮询扫码状态
+
+```
+GET https://hongguoduanju.com/passport/web/check_qrconnect/?next=...&aid=513755&account_sdk_source=web&token={二维码 token}
+Cookie: {get_qrcode 设置的 Cookie}
+x-tt-passport-csrf-token: {Cookie 中的 passport_csrf_token}
+```
+
+响应 `data.status`：
+
+| 状态 | 界面行为 |
+| --- | --- |
+| `new`（兼容等待态） | 继续轮询 |
+| `scanned` | 提示「已扫码，请在手机上确认登录」 |
+| `confirmed` | 跟随 `data.redirect_url`，建立会话 |
+| `expired` | 提示过期并自动刷新二维码 |
+
+字符串 `confirmed` 直接按确认处理；数值 `3` 或未知状态只有带 `redirect_url` 时才按确认，避免把过期态误判为登录成功。
+
+#### 4.6.3 登录落地与账号资料
+
+确认后对 `redirect_url` 发起 GET，再访问一次 `https://hongguoduanju.com/` 补全 Cookie。整个过程用独立的扫码 Cookie 存储，按域名/路径匹配；落地失败时保留轮询响应已经下发的 Cookie。
+
+登录态至少需要 `sessionid`、`sessionid_ss`、`sid_tt` 或 `sid_guard` 之一。拿到 Cookie 后：
+
+1. 先把 Cookie 与 `X-Tt-Token` 暂存为本地会话；用户 ID 优先取 `uid_tt` / `uid_tt_ss` / `sso_uid_tt` / `sid_tt`，没有时用 `sessionid` 的 UUID 哈希作为本地标识；
+2. 调用 4.6.4 的账号资料接口；
+3. 资料接口成功则更新昵称/头像/简介；暂时失败则保留通用登录提示，不伪造资料；
+4. 服务端明确返回未登录/过期时清空临时会话并提示重新扫码。
+
+#### 4.6.4 刷新账号资料
+
+```
+GET https://api5-normal-sinfonlineb.fqnovel.com/reading/user/info/v?{签名参数}
+Cookie: {登录会话 Cookie}
+X-Tt-Token: {登录响应头}
+```
+
+查询参数使用 `version_code=73932` / `version_name=7.3.9.32`，并带 `check_idfa=false`、`not_need_perm=false` 等兼容字段。响应 `code == 0` 时取 `data.user_name`、`data.avatar_url` 或 `data.expand_avatar_url`、`data.description`；手机号只保存脱敏值。刷新失败保留原资料并提示，确认未登录/过期时才清空 `native-auth-v1`。
+
+资料响应里的数字 `data.req_id` 会保存为会话的 `accountId`，仅用于 4.7.2 的收藏请求，不展示、不写日志；接口未返回时保留会话中已有的值。
+
+### 4.7 账号记录与预约
+
+代码位置：`ContentRepository.accountHistory()`、`accountFavorites()`、`accountReservations()`、`setReservation()`；界面在「我的」的「最近观看 / 收藏 / 预约」分栏。
+
+以下请求都使用 4.6 建立的登录会话：`Cookie` 与 `X-Tt-Token` 自动附加到 `*.fqnovel.com` 官方域名，查询串由 `Signer` 按 App 版本参数签名，并带 `lc: 101`、`x-ss-dp: 8662`。网络或单个接口失败只影响对应分栏，匿名浏览、搜索、详情和播放继续可用；服务端确认登录过期时统一清空会话并回到未登录状态。
+
+#### 4.7.1 观看记录
+
+```
+GET https://api5-normal-sinfonlineb.fqnovel.com/reading/bookapi/read_history/list/v?{签名参数}
+  &offset=0&limit=30&book_type={2|3|4|5}
+  &query_soft_deleted=false&is_first_load=false
+  &last_min_read_timestamp_ms=0&full_field=false
+```
+
+客户端按 `book_type=2/3/4/5` 分别请求后合并，`read_timestamp_ms` 倒序，按 `video_data.series_id`（缺失时用 `book_id_str`）去重。响应 `data.data_list[]` 中使用的字段：
+
+| 字段 | 说明 |
+| --- | --- |
+| `video_data.series_id` | 优先作为详情页剧集 ID |
+| `book_id_str` / `book_id` | 无嵌套 `series_id` 时的剧集 ID 兜底 |
+| `book_name` / `video_data.series_title` | 标题 |
+| `thumb_url` / `video_data.series_cover` | 封面 |
+| `vid` / `vid_index` | 最近观看的视频 ID 与分集下标 |
+| `current_play_position` / `duration` | 续播位置与时长，毫秒 |
+| `read_timestamp_ms` | 最近观看时间，用于排序 |
+| `episode_cnt`、`category_list` | 集数与题材，用于卡片角标 |
+
+单个 `book_type` 失败不影响其它类型；全部失败才向界面报错。列表只读，不回写观看进度。
+
+#### 4.7.2 短剧收藏
+
+```
+GET https://api5-normal-sinfonlineb.fqnovel.com/reading/bookapi/bookshelf/video/list/v?{签名参数}
+  &target_user_id={accountId}
+```
+
+`target_user_id` 取自 4.6.4 的 `data.req_id`；资料里没有该值时不会猜测其它 ID，收藏页会提示先刷新账号资料。响应 `data.video_shelf_info[]`；收藏条目可能把剧集字段放在顶层、`video_data`、`series_info` 或 `book_info` 中，客户端会依次读取 `series_id` / `book_id`、标题、封面、简介、集数和题材标签。`data.max_bookshelf_cnt` 只表示容量，不参与列表展示。
+
+列表只读；在电视端详情页收藏仍写入本机 `Library`，不会调用收藏写接口。
+
+#### 4.7.3 预约列表
+
+```
+GET https://api5-normal-sinfonlineb.fqnovel.com/reading/user/subscribe/list/v1/?{签名参数}
+  &offset=0&limit=30&is_online={false|true}
+  &tab_type=13&subscribe_order_type=0&swipe_type=0
+  &need_calendar_schema=false&subscribe_offset=0
+```
+
+客户端分别请求 `is_online=false` 和 `is_online=true`，合并后待上线优先、再按预计上线时间排序。响应 `data.subscribe_items[]`：
+
+| 字段 | 说明 |
+| --- | --- |
+| `item_id` | 预约项 ID；详情、取消预约都使用它 |
+| `item_type` | 短剧预约项为 `14`，取消时原样带回 |
+| `name` / `cover` / `item_desc` | 标题、封面、简介 |
+| `is_online` | 是否已上线；`false` 时没有可播放分集 |
+| `has_subscribed` | 当前是否在预约中 |
+| `expected_rec_text` | 上线时间提示文案 |
+| `expected_publish_time` / `schedule_publish_time` / `publish_time` | 预计上线时间，用于排序 |
+| `tag_info.text`、`categories` / `tags` | 题材与角标 |
+
+待上线条目只进入预约详情页，显示预约/取消预约按钮，不请求播放信息。
+
+#### 4.7.4 预约与取消预约
+
+```
+POST https://api5-normal-sinfonlineb.fqnovel.com/reading/bookapi/search/uncover_subscribe/v:version/?{签名参数}
+Content-Type: application/json
+
+{
+  "item_id": 444,
+  "item_type": 14,
+  "op_type": 1,
+  "item_id_str": "444",
+  "wish_list_all_del": 0,
+  "shark_param": {
+    "enter_from": "ShortSeriesActivity",
+    "previous_page": "MainFragmentActivity",
+    "page_list": "MainFragmentActivity,ShortSeriesActivity"
+  }
+}
+```
+
+`op_type=1` 表示预约，`op_type=2` 表示取消；客户端每次只改一个预约项，`wish_list_all_del=0` 避免清空其它预约。响应 `code == 0` 即成功，界面随后刷新预约列表；失败时保留原状态并提示。HTTP 401/403 或服务端明确的未登录/过期信息会清空登录会话，未登录时不显示可写的预约入口。
 
 ## 5. 自动更新
 

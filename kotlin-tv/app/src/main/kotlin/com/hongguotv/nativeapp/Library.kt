@@ -124,6 +124,9 @@ class Library(context: Context) {
     fun toggle(series: Series) = state().toggle(series).also { persist("favorites", "favoriteUpdates") }
     fun toggleLater(series: Series) = state().toggleLater(series).also { persist("later") }
     fun save(progress: WatchProgress) { if (state().save(progress)) persist("progress") }
+    fun mergeRemote(rows: List<AccountHistoryItem>): List<WatchProgress> = state().mergeRemote(rows).also {
+        if(it.isNotEmpty()) persist("progress","watched")
+    }
     fun setWatched(id: String, value: Boolean) { if (state().setWatched(id, value)) persist("watched") }
     fun hide(id: String) { state().hide(id); persist("hidden") }
     fun unhideAll() { state().unhideAll(); persist("hidden") }

@@ -12,7 +12,7 @@
 | `outputs/hongguotv-0.1.0-docker.zip` | 独立服务源码、Dockerfile、两种 Compose、示例环境变量及部署说明 |
 | `outputs/SHA256SUMS` | 交付文件的 SHA-256 校验值 |
 
-下载入口：[GitHub v0.1.0 Release](https://github.com/N3urda/hongguoTV/releases/tag/v0.1.0)。使用电脑或 NAS 容器部署时，直接参阅 [Docker 部署指南](DOCKER.md)。
+下载入口：[GitHub v0.1.0 Release](https://github.com/wanwdbb/hongguoTV/releases/latest)。使用电脑或 NAS 容器部署时，直接参阅 [Docker 部署指南](DOCKER.md)。
 
 应用标识为 `com.hongguotv`，版本名 `0.1.0`，版本号 `1`。包内包含 `armeabi-v7a` 和 `arm64-v8a`，最低系统为 Android 8.0 / API 26，targetSdk 为 36。首版使用开发密钥签名，面向个人安装；密钥不随源码包分发。请保留本机 `android/app/debug.keystore`，后续覆盖升级需使用相同密钥。卸载应用会清除本地收藏与观看记录。
 
@@ -79,4 +79,4 @@ adb install -r outputs/hongguotv-0.1.0-android8.apk
 
 React Native TV 已锁定为 `0.81.5-2`，启用新架构；播放器为 `react-native-video 6.19.3`。`.npmrc` 的 `legacy-peer-deps=true` 用于兼容 RN TV 预发布版本号与第三方包的 peer 版本范围，依赖安装由锁文件固定。
 
-代码许可及第三方来源见根目录 `LICENSE` 和 `server/vendor/NOTICE.md`。源代码发布到 [GitHub 仓库](https://github.com/N3urda/hongguoTV)，APK 和交付文件作为 Release 附件提供；安装包和签名密钥不进入 Git 历史。
+代码许可及第三方来源见根目录 `LICENSE` 和 `server/vendor/NOTICE.md`。源代码发布到 [GitHub 仓库](https://github.com/wanwdbb/hongguoTV)，APK 和交付文件作为 Release 附件提供；安装包和签名密钥不进入 Git 历史。

@@ -5,6 +5,7 @@ plugins { id("com.android.application"); kotlin("android") }
 val signingProperties = Properties().apply { val config = rootProject.file("keystore.properties"); if (config.exists()) config.inputStream().use { load(it) } }
 fun signingValue(env: String, key: String): String? = System.getenv(env) ?: signingProperties.getProperty(key)
 // Release artifacts ship as hongguotv-<versionName>-release.apk so the build output, the GitHub release asset and the update manifest all agree.
+val isolatedTest = providers.gradleProperty("tvIsolatedTest").orNull == "true"
 val deliveryVersionCode = System.getenv("HONGGUOTV_VERSION_CODE")?.toInt() ?: 9
 val deliveryVersionName = System.getenv("HONGGUOTV_VERSION_NAME") ?: "0.9.0"
 
@@ -13,6 +14,7 @@ android {
     compileSdk = 36
     defaultConfig {
         applicationId = "com.hongguotv.nativeapp"
+        manifestPlaceholders["appLabel"] = "红果 TV 原生版"
         minSdk = 26
         targetSdk = 36
         versionCode = deliveryVersionCode
@@ -27,7 +29,15 @@ android {
             keyPassword = signingValue("HONGGUOTV_KEY_PASSWORD", "keyPassword")
         }
     }
-    buildTypes { getByName("release") { signingConfig = signingConfigs.getByName("delivery"); isMinifyEnabled = true; proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro") } }
+    buildTypes {
+        getByName("debug") {
+            if(isolatedTest) {
+                applicationIdSuffix = ".petstest"
+                manifestPlaceholders["appLabel"] = "红果 TV 测试版"
+                signingConfig = signingConfigs.getByName("delivery")
+            }
+        }
+        getByName("release") { signingConfig = signingConfigs.getByName("delivery"); isMinifyEnabled = true; proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro") } }
     compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17; isCoreLibraryDesugaringEnabled = true }
     kotlinOptions { jvmTarget = "17" }
     packaging { resources.excludes += setOf("META-INF/versions/**", "META-INF/*.kotlin_module") }

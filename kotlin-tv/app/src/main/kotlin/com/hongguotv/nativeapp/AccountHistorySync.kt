@@ -81,8 +81,12 @@ internal class AccountHistorySync(context: Context,private val repository: Conte
                 rows.entries.removeAll { (id,row) ->
                     val historyTime=remote[id]?.readAt ?: 0L
                     val progressTime=progress[id]?.readAt ?: 0L
-                    maxOf(historyTime,progressTime)>row.progress.updatedAt ||
-                        (historyTime>=row.progress.updatedAt && progressTime>=row.progress.updatedAt)
+                    val local=row.progress
+                    val historyOrder=remote[id]?.let { WatchProgressOrder.compare(it.episodeIndex,it.position,local.episodeIndex,local.position) }
+                    val progressOrder=progress[id]?.let { WatchProgressOrder.compare(it.episodeIndex,it.position,local.episodeIndex,local.position) }
+                    // Never replace a farther cloud store with a shorter local checkpoint.
+                    historyOrder?.let { it>0 }==true || progressOrder?.let { it>0 }==true ||
+                        (historyOrder==0 && progressOrder==0 && historyTime>=local.updatedAt && progressTime>=local.updatedAt)
                 }
                 rows.replaceAll { id,row -> row.copy(bookType=remote[id]?.series?.bookType ?: row.bookType) }
                 check(persist(key,rows))

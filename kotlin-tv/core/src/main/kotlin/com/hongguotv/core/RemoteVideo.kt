@@ -20,6 +20,8 @@ class RemoteVideo(private val http: OkHttpClient, val info: StreamInfo): Closeab
         require(start>=0 && end>=start && end-start<8*1024*1024)
         val request=Request.Builder().url(info.url).header("User-Agent",VendorConstants.VIDEO_UA).header("Referer","https://novel.snssdk.com/").header("Range","bytes=$start-$end").header("Accept-Encoding","identity").build()
         val call=http.newCall(request)
+        // Bound the complete response, including a server trickling bytes below readTimeout.
+        call.timeout().timeout(18,java.util.concurrent.TimeUnit.SECONDS)
         synchronized(calls) { if(closed) throw IOException("播放请求已取消"); calls+=call }
         try {
             return RequestScope.execute(call) { response ->

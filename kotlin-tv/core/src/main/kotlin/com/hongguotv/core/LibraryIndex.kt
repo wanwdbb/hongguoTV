@@ -61,7 +61,11 @@ class LibraryIndex(data: BackupData, updates: Map<String, FavoriteUpdate> = empt
         val changed=mutableListOf<BackupProgress>()
         rows.sortedBy { it.readAt }.forEach { row ->
             val old=progressById[row.series.id]
-            if(row.readAt<=0 || row.episodeId.isBlank() || row.readAt<=(old?.updatedAt ?: 0L)) return@forEach
+            if(row.readAt<=0 || row.episodeId.isBlank()) return@forEach
+            if(old!=null) {
+                val order=WatchProgressOrder.compare(row.episodeIndex,row.position,old.episodeIndex,old.position)
+                if(order<0 || (order==0 && row.readAt<=old.updatedAt)) return@forEach
+            }
             val same=old?.episodeId==row.episodeId
             val metadata=if(row.series.title.isBlank()) old?.series ?: row.series else row.series
             val position=row.position.coerceAtLeast(0)

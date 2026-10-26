@@ -303,6 +303,7 @@ class MainActivity: Activity() {
     private var pendingSeek: Long?=null
     private var playError=false
     private var lastSaved=0L
+    private val bufferingWatchdog=com.hongguotv.core.BufferingWatchdog()
     private var quality=""
     private var feedQualityButton: TextView?=null
     private val tick=object: Runnable {
@@ -310,6 +311,12 @@ class MainActivity: Activity() {
             if(!foreground || isDestroyed) return
             if(screen==Screen.PLAYER) {
                 if(sleepTimer.poll()) stopForSleep()
+                val buffering=player?.playbackState==Player.STATE_BUFFERING && requestedAutoplay && !pausedForLifecycle && episodePanel==null && !playError && !sleepStopped
+                if(bufferingWatchdog.poll(android.os.SystemClock.elapsedRealtime(),buffering)) {
+                    android.util.Log.w("HongguoTV","Buffering exceeded 30s; refreshing stream at preserved position")
+                    video?.close()
+                    playerFailure(java.net.SocketTimeoutException("视频缓冲超时"))
+                }
                 if(hud.visibility==View.VISIBLE) updatePlaybackText()
                 maybePrefetch()
                 maybePrefetchFeed()
@@ -2204,6 +2211,7 @@ class MainActivity: Activity() {
     private fun playEpisode(index: Int,position: Long=0,autoplay: Boolean=true,recovering: Boolean=false,saveCurrent: Boolean=true,ready: FeedReady?=null) {
         updater.interrupt()
         val data=detail ?: return
+        bufferingWatchdog.reset()
         val playbackStarted=android.os.SystemClock.elapsedRealtime()
         val reuse=screen==Screen.PLAYER && player!=null && playerView!=null && !recovering && !playError
         library.setWatched(data.series.id,false)
@@ -2275,7 +2283,8 @@ class MainActivity: Activity() {
             video=remote; quality=remote.info.quality
             feedQualityButton?.text="清晰度 ${currentQualityLabel()}"
             val p=player ?: run {
-                val load=DefaultLoadControl.Builder().setBufferDurationsMs(15000,30000,1000,2000).setTargetBufferBytes(12*1024*1024).build()
+                // Time thresholds must win over the byte cap, otherwise high-bitrate rebuffering can wait for the cap.
+                val load=DefaultLoadControl.Builder().setBufferDurationsMs(15000,30000,1000,2000).setTargetBufferBytes(12*1024*1024).setPrioritizeTimeOverSizeThresholds(true).build()
                 val renderers=androidx.media3.exoplayer.DefaultRenderersFactory(this).setEnableDecoderFallback(true)
                 ExoPlayer.Builder(this,renderers).setLoadControl(load).build().also {
                     player=it; playerView?.player=it
@@ -2288,6 +2297,7 @@ class MainActivity: Activity() {
                 private fun active()=player===p && generation==ticket && p.currentMediaItem?.mediaId==requestedId
                 override fun onPlaybackStateChanged(state: Int) {
                     if(!active()) return
+                    if(state!=Player.STATE_BUFFERING) bufferingWatchdog.reset()
                     if(state==Player.STATE_READY) {
                         if(!p.currentTracks.isTypeSelected(C.TRACK_TYPE_VIDEO)) {
                             playerFailure(PlaybackException("资源没有可解码的视频轨道",null,PlaybackException.ERROR_CODE_DECODING_FORMAT_UNSUPPORTED))
@@ -2776,6 +2786,7 @@ class MainActivity: Activity() {
         accountHistorySync.offer(progress,data.series.bookType,data.episodes.size)
     }
     private fun releasePlayer() {
+        bufferingWatchdog.reset()
         cancelRecovery(); cancelPrefetch(); mediaSession.deactivate(); tvTools.close()
         val wasForeground=foreground; foreground=false
         val oldPanel=episodePanel; episodePanel=null; oldPanel?.dismiss(); foreground=wasForeground

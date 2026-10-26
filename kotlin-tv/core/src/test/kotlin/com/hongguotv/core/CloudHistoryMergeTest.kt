@@ -18,14 +18,14 @@ class CloudHistoryMergeTest {
         assertEquals(ResumeTarget(1,126576),ResumePlayback.target(listOf("456","789"),current.episodeId,current.position,current.completed))
         assertEquals(current,LibraryDisk.decode(mapOf("progress" to LibraryDisk.history(state.history()))).progress("123"))
     }
-    @Test fun newerCloudRewatchCanMoveBackwardButOldCloudCannotOverwriteNewLocal() {
+    @Test fun newerCloudRewatchCannotOverwriteFartherLocal() {
         val state=index()
         state.save(local().copy(episodeId="789",episodeIndex=12,updatedAt=3000))
         assertTrue(state.mergeRemote(listOf(AccountHistoryItem(series,"456",0,900,0,2000))).isEmpty())
         assertEquals("789",state.progress("123")!!.episodeId)
         state.mergeRemote(listOf(AccountHistoryItem(series,"456",0,500,0,4000)))
-        assertEquals("456",state.progress("123")!!.episodeId)
-        assertEquals(500L,state.progress("123")!!.position)
+        assertEquals("789",state.progress("123")!!.episodeId)
+        assertEquals(1000L,state.progress("123")!!.position)
     }
     @Test fun identicalPositionStillImportsCloudTimestampAndRepeatedPullDoesNothing() {
         val state=index(); val row=AccountHistoryItem(series,"456",0,1000,60000,2000)

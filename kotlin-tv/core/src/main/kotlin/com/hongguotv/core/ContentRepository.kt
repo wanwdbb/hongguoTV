@@ -707,7 +707,8 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
         progress.forEach { remote ->
             val old=rows[remote.seriesId]
             val series=old?.series ?: metadata[remote.seriesId] ?: return@forEach
-            if(remote.readAt>(old?.readAt ?: 0L)) rows[remote.seriesId]=AccountHistoryItem(series,remote.episodeId,remote.episodeIndex,
+            val order=old?.let { WatchProgressOrder.compare(remote.episodeIndex,remote.position,it.episodeIndex,it.position) } ?: 1
+            if(order>0 || (order==0 && remote.readAt>(old?.readAt ?: 0L))) rows[remote.seriesId]=AccountHistoryItem(series,remote.episodeId,remote.episodeIndex,
                 remote.position,if(old?.episodeId==remote.episodeId) old.duration else 0,remote.readAt)
         }
         ensureHistorySession(session)

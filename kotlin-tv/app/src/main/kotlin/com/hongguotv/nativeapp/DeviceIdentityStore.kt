@@ -26,15 +26,19 @@ internal object DeviceIdentityStore {
 
     /** 后台注册一次设备身份。失败只记日志，下次启动再试。 */
     fun ensure(context: Context,repository: ContentRepository,worker: Executor) {
-        if(DeviceIdentity.registered) return
         val app=context.applicationContext
+        fun save(registration: com.hongguotv.core.DeviceRegistration) {
+            app.getSharedPreferences(FILE,Context.MODE_PRIVATE).edit()
+                .putString(KEY_INSTALL,registration.installId).putString(KEY_DEVICE,registration.deviceId).apply()
+        }
+        repository.onDeviceRegistration=::save
+        if(DeviceIdentity.registered) return
         worker.execute {
             runCatching { repository.registerDevice() }
                 .onSuccess { registration ->
                     if(DeviceIdentity.apply(registration.installId,registration.deviceId)) {
-                        app.getSharedPreferences(FILE,Context.MODE_PRIVATE).edit()
-                            .putString(KEY_INSTALL,registration.installId).putString(KEY_DEVICE,registration.deviceId).apply()
-                        Log.i("HongguoTV","Device registered install_id=${registration.installId}")
+                        save(registration)
+                        Log.i("HongguoTV","Device registered")
                     }
                 }
                 .onFailure { Log.w("HongguoTV","Device registration failed; keeping fallback identity",it) }

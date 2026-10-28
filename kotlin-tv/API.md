@@ -12,6 +12,10 @@
 - `core/src/main/kotlin/com/hongguotv/core/AppUpdates.kt`：自动更新
 - `core/src/main/kotlin/com/hongguotv/core/PhoneSearchServer.kt`、`LibraryTransferServer.kt`：局域网服务
 
+## 2026-10-28 HAR4 协议更新
+
+当前播放优先请求 player/v1；空响应、网络或接口错误回退原 preload/v1/。支持直返数组 video_list、嵌套 video_meta/encrypt_info，只有缺少可用直返资源时才请求 fallback_api。网页详情失败时新增 video_detail/v1/ 备用；弹幕使用完整 7.3.9.32 设备版本参数。协议证据、兼容范围和验证边界见 [HAR4 核对](API_HAR4.md)。
+
 ## 1. 总览
 
 | 用途 | 地址 | 方法 | 鉴权 |
@@ -577,6 +581,8 @@ User-Agent: VIDEO_UA
 - `fallback_api` 可能是字符串、对象里的 `fallback_api` 字段，或数组第一个元素；
 - `fallback_api` 必须以 `https://` 开头；
 
+HAR4 更新：正式 player 路径与 gzip 请求体优先，dr_scene=player；上方 preload 与旧响应示例保留为兼容分支说明。新响应 video_list 是数组，编码/清晰度位于 video_meta，加密信息位于 encrypt_info。video_model.status=10 在本次抓包中是正常资源模型，不等同于顶层 API code。
+
 #### 4.4.2 播放地址明细
 
 ```
@@ -643,17 +649,17 @@ Content-Type: application/json; charset=UTF-8
 User-Agent: VIDEO_UA
 ```
 
-签名参数只带最小集合（不传完整设备参数）：
+当前使用 recentOfficialValues 的完整设备参数；下列为其中的固定公共字段：
 
 ```
 aid=8662
 app_name=novelread
 channel=update_64
 device_platform=android
-manifest_version_code=73532
-update_version_code=73532
-version_code=73532
-version_name=7.3.5.32
+manifest_version_code=73932
+update_version_code=73932
+version_code=73932
+version_name=7.3.9.32
 ```
 
 请求体：
@@ -1019,8 +1025,8 @@ GET search/tab/v（第 1 页，is_first_enter_search=true）
 
 ```
 GET /detail?series_id=...（拿 vid_list）
-  → POST multi_video_model/preload/v1/
-  → GET fallback_api
+  → POST multi_video_model/player/v1（gzip，7.3.9.32；失败回退 preload/v1/）
+  → 解析直返 video_list；无可用资源时 GET fallback_api
   → 解密 main_url（key_seed）
   → GET main_url（Range + Referer）
   → 有 spade_a 时按样本 AES-CTR 解密

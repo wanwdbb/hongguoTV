@@ -129,6 +129,23 @@ class SearchSessionExpiredException: IOException("搜索结果已过期，请从
 
 class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectTimeout(15,TimeUnit.SECONDS).readTimeout(30,TimeUnit.SECONDS).callTimeout(45,TimeUnit.SECONDS).build(), private val clock: () -> Long = System::currentTimeMillis) {
     private val signer = Signer()
+    /** App persists successful playback identity recovery without changing the login session. */
+    var onDeviceRegistration: ((DeviceRegistration) -> Unit)? = null
+    private var lastPlaybackRegistrationNanos: Long? = null
+    private class EmptyPlaybackResponse: IOException("播放接口返回空，请稍后重试")
+    private fun recoverPlaybackIdentity(observedDevice: String): Boolean = synchronized(DeviceIdentity) {
+        if(DeviceIdentity.deviceId!=observedDevice) return@synchronized true
+        val now=System.nanoTime()
+        if(lastPlaybackRegistrationNanos?.let { now-it<TimeUnit.MINUTES.toNanos(5) }==true) return@synchronized false
+        lastPlaybackRegistrationNanos=now
+        val registration=try { registerDevice() } catch(problem: IOException) {
+            RequestScope.ensureActive()
+            return@synchronized false
+        }
+        if(!DeviceIdentity.apply(registration.installId,registration.deviceId)) return@synchronized false
+        onDeviceRegistration?.invoke(registration)
+        true
+    }
     private val site = "https://hongguoduanju.com"
     private val authLock=Any()
     private val authCookies=linkedMapOf<String,String>()
@@ -755,9 +772,9 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
             data.optJSONArray(key)?.let { return it.objects() }
             data.optJSONObject(key)?.let { holder ->
                 val nested=holder.optJSONArray("list") ?: holder.optJSONArray("items") ?: holder.optJSONArray("data_list")
-                if(nested!=null) return@let nested.objects()
-                if(firstText(holder,"book_id","series_id","item_id","id").isNotBlank()) return@let listOf(holder)
-                if(holder.length()>0) return@let holder.keys().asSequence().mapNotNull { holder.optJSONObject(it) }.toList()
+                if(nested!=null) return nested.objects()
+                if(firstText(holder,"book_id","series_id","item_id","id").isNotBlank()) return listOf(holder)
+                if(holder.length()>0) return holder.keys().asSequence().mapNotNull { holder.optJSONObject(it) }.toList()
             }
         }
         return emptyList()
@@ -1157,13 +1174,37 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
     /** [includeRelated] 只在详情页使用；推荐流和预取不需要额外请求相关作品。 */
     fun detail(id: String, includeRelated: Boolean = false): Detail {
         require(id.matches(Regex("[0-9]{1,30}")))
-        val o=router("$site/detail?series_id=$id").optJSONObject("detail_page")?.optJSONObject("seriesDetail") ?: throw IOException("剧集详情暂不可用")
+        val o=try {
+            router("$site/detail?series_id=$id").optJSONObject("detail_page")?.optJSONObject("seriesDetail") ?: throw IOException("剧集详情暂不可用")
+        } catch(problem: Exception) {
+            RequestScope.ensureActive()
+            return officialDetail(id).let { if(includeRelated) enrichDetail(it) else it }
+        }
         val raw=o.optJSONArray("vid_list") ?: throw IOException("分集暂不可用")
         val episodes=(0 until raw.length()).map { raw.getString(it) }
         if(episodes.isEmpty() || episodes.any { !it.matches(Regex("[0-9]{1,30}")) } || episodes.distinct().size!=episodes.size) throw IOException("分集数据异常")
         val cast=people(o)
         val basic=Detail(card(o).copy(id=id),episodes,cast)
         return if(includeRelated) enrichDetail(basic) else basic
+    }
+    /** HAR4 video_detail response is a separate fallback; web-only cast/related remain optional. */
+    private fun officialDetail(id: String): Detail {
+        val body=JSONObject().put("series_id",id).put("biz_param",JSONObject()
+            .put("detail_page_version",1).put("disable_digg_stat",false).put("disable_video_relate_book",false)
+            .put("need_all_video_definition",false).put("need_mp4_align",false).put("screen_width_px","1920")
+            .put("source",5).put("use_os_player",false).put("use_server_dns",false).put("video_id_type",1))
+        val signed=signer.sign("https://api5-normal-sinfonlineb.fqnovel.com/novel/player/video_detail/v1/",recentOfficialValues(),body.toString().toByteArray(Charsets.UTF_8))
+        val root=JSONObject(text(signed.url,signed))
+        if(responseCode(root)!=0) throw IOException("剧集详情暂不可用")
+        val row=root.optJSONObject("data")?.optJSONObject("video_data") ?: throw IOException("剧集详情格式异常")
+        val returned=row.str("series_id_str").ifBlank { row.str("series_id") }
+        if(returned!=id) throw IOException("剧集详情标识不匹配")
+        val raw=row.optJSONArray("video_list")?.objects().orEmpty().sortedBy { it.optInt("vid_index",Int.MAX_VALUE) }
+        val episodes=raw.map { it.str("vid") }
+        if(episodes.isEmpty() || episodes.any { !it.matches(Regex("[0-9]{1,30}")) } || episodes.distinct().size!=episodes.size) throw IOException("分集数据异常")
+        val series=card(row).copy(id=id)
+        if(series.title.isBlank()) throw IOException("剧集详情缺少标题")
+        return Detail(series,episodes,people(row))
     }
     /** Optional sections never delay the episode list or direct playback. */
     fun enrichDetail(detail: Detail): Detail {
@@ -1185,28 +1226,84 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
     }
     fun stream(id: String, maxQuality: Int = 1080): StreamInfo {
         require(id.matches(Regex("[0-9]{1,30}")))
-        val payload="""{"biz_param":{"detail_page_version":0,"device_level":3,"disable_digg_stat":false,"need_all_video_definition":true,"need_mp4_align":false,"use_os_player":false,"use_server_dns":false,"video_platform":1024},"mixed_video_id_map":{"1004":["$id"]}}""".toByteArray()
-        val signed=signer.sign("https://api5-normal-sinfonlineb.fqnovel.com/novel/player/multi_video_model/preload/v1/",VendorConstants.device,payload)
-        val data=JSONObject(text(signed.url,signed))
-        if(data.optInt("Code",data.optInt("code",0))!=0) throw IOException("播放接口暂不可用")
-        val map=data.optJSONObject("data") ?: throw IOException("播放信息为空")
-        val entry=map.optJSONObject(id) ?: map.keys().asSequence().mapNotNull { map.optJSONObject(it) }.firstOrNull() ?: throw IOException("播放信息为空")
-        val model=entry.optJSONObject("video_model") ?: JSONObject(entry.str("video_model"))
+        val payload=JSONObject().put("biz_param",JSONObject()
+            .put("detail_page_version",0).put("device_level",3).put("disable_digg_stat",false)
+            .put("disable_video_relate_book",false).put("need_all_video_definition",true)
+            .put("need_mp4_align",false).put("use_os_player",false).put("use_server_dns",false).put("video_platform",1024))
+            .put("dr_scene","player").put("mixed_video_id_map",JSONObject().put("1004",JSONArray().put(id)))
+            .toString().toByteArray(Charsets.UTF_8)
+        val compressed=java.io.ByteArrayOutputStream().also { output -> java.util.zip.GZIPOutputStream(output).use { it.write(payload) } }.toByteArray()
+        fun fetch(endpoint: String,values: Map<String,String>,bytes: ByteArray,headers: Map<String,String>): JSONObject {
+            val signed=signer.sign(endpoint,values,bytes)
+            val response=text(signed.url,signed,headers)
+            if(response.isBlank()) throw EmptyPlaybackResponse()
+            val result=runCatching { JSONObject(response) }.getOrElse { throw IOException("播放接口格式异常") }
+            if(responseCode(result)!=0) throw IOException("播放接口暂不可用")
+            return result
+        }
+        fun fetchCompatible() = try {
+            fetch("https://api5-normal-sinfonlineb.fqnovel.com/novel/player/multi_video_model/player/v1",
+                recentOfficialValues(),compressed,accountHeaders()+mapOf("Content-Encoding" to "gzip","User-Agent" to VendorConstants.VIDEO_UA.replace("/71332","/73932")))
+        } catch(problem: IOException) {
+            RequestScope.ensureActive()
+            // Some registered devices receive an empty player response. Preserve the existing preload route.
+            fetch("https://api5-normal-sinfonlineb.fqnovel.com/novel/player/multi_video_model/preload/v1/",
+                VendorConstants.device,payload,emptyMap())
+        }
+        val observedDevice=DeviceIdentity.deviceId
+        val data=try { fetchCompatible() } catch(problem: EmptyPlaybackResponse) {
+            RequestScope.ensureActive()
+            if(!recoverPlaybackIdentity(observedDevice)) throw problem
+            // Re-sign both routes with the newly registered identity; retry at most once.
+            fetchCompatible()
+        }
+        // A batch may contain neighbours: never silently play another episode.
+        val entry=data.optJSONObject("data")?.optJSONObject(id) ?: throw IOException("播放信息缺少当前分集")
+        val model=entry.optJSONObject("video_model") ?: runCatching { JSONObject(entry.str("video_model")) }.getOrNull()
+            ?: throw IOException("播放模型格式异常")
+        val direct=streamVariants(model,maxQuality)
+        if(direct!=null) return direct
+        // Legacy model can expose only a resolver URL. Use it only when direct variants are absent/unusable.
         val raw=model.opt("fallback_api")
-        val fallback=when(raw) { is JSONObject -> raw.str("fallback_api"); is JSONArray -> raw.optString(0); else -> runCatching { JSONObject(raw.toString()).str("fallback_api") }.getOrDefault(raw.toString()) }
-        if(!fallback.startsWith("https://")) throw IOException("播放地址格式异常")
-        val info=JSONObject(text(fallback)).optJSONObject("video_info")?.optJSONObject("data") ?: throw IOException("没有播放资源")
-        val videoList=info.optJSONObject("video_list") ?: throw IOException("没有可用清晰度")
-        // ByteVC2 resources can expose playable audio but no video track in Android's MP4 extractor.
-        // Keep missing legacy codec labels usable, but never select a known incompatible variant.
-        val rows=videoList.keys().asSequence().mapNotNull { k -> videoList.optJSONObject(k)?.let { k to it } }.filter {
-            it.second.str("main_url").isNotEmpty() && it.second.str("codec_type").lowercase() !in setOf("bytevc2","bvc2")
-        }.map { (k,o) -> Triple(qualityNumber(o.str("quality_desc").ifEmpty { o.str("height").ifEmpty { o.str("vheight").ifEmpty { o.str("quality").ifEmpty { k } } } }),k,o) }.sortedByDescending { it.first }.toList()
-        val selected=rows.firstOrNull { it.first<=maxQuality } ?: rows.lastOrNull() ?: throw IOException("没有电视可播放的清晰度，请稍后再试或选择其他剧集")
-        val item=selected.third; var url=cleanUrl(item.str("main_url")); val seed=info.str("key_seed")
+        val fallback=when(raw) {
+            is JSONObject -> raw.str("fallback_api")
+            is JSONArray -> raw.optString(0)
+            is String -> runCatching { JSONObject(raw).str("fallback_api") }.getOrDefault(raw)
+            else -> ""
+        }
+        if(!fallback.startsWith("https://")) throw IOException("没有电视可播放的清晰度")
+        val resolved=JSONObject(text(fallback))
+        if(responseCode(resolved)!=0) throw IOException("播放地址解析失败")
+        val info=resolved.optJSONObject("video_info")?.optJSONObject("data") ?: throw IOException("没有播放资源")
+        return streamVariants(info,maxQuality) ?: throw IOException("没有电视可播放的清晰度，请选择其他剧集")
+    }
+    private fun streamVariants(info: JSONObject,maxQuality: Int): StreamInfo? {
+        val list=info.opt("video_list")
+        val variants=when(list) {
+            is JSONArray -> list.objects()
+            is JSONObject -> list.keys().asSequence().mapNotNull { list.optJSONObject(it) }.toList()
+            else -> emptyList()
+        }
+        val rows=variants.mapNotNull { item ->
+            val meta=item.optJSONObject("video_meta") ?: item
+            val codec=meta.str("codec_type").lowercase()
+            val format=meta.str("vtype").lowercase()
+            if(codec in setOf("bytevc2","bvc2") || (format.isNotEmpty() && format!="mp4") || item.str("main_url").isBlank()) return@mapNotNull null
+            val height=qualityNumber(meta.str("definition").ifEmpty { meta.str("quality_desc").ifEmpty { meta.str("vheight").ifEmpty { meta.str("height").ifEmpty { meta.str("quality") } } } })
+            height to item
+        }.sortedByDescending { it.first }
+        val selected=rows.firstOrNull { it.first<=maxQuality } ?: rows.lastOrNull() ?: return null
+        val item=selected.second
+        var url=cleanUrl(item.str("main_url"))
+        val seed=info.str("key_seed")
         if(seed.isNotEmpty()) url=MediaCrypto.decryptUrl(url,decode64(seed))
         if(!url.startsWith("https://") && !url.startsWith("http://")) throw IOException("播放地址无效")
-        val key=item.str("spade_a").takeIf { it.isNotEmpty() }?.let(MediaCrypto::deriveKey)
+        val encryption=item.optJSONObject("encrypt_info")
+        val spade=encryption?.str("spade_a").orEmpty().ifEmpty { item.str("spade_a") }
+        if(encryption?.optBoolean("encrypt",false)==true && spade.isBlank()) throw IOException("播放加密信息不完整")
+        val method=encryption?.str("encryption_method").orEmpty()
+        if(method.isNotEmpty() && method!="cenc-aes-ctr") throw IOException("视频加密格式暂不支持")
+        val key=spade.takeIf { it.isNotEmpty() }?.let(MediaCrypto::deriveKey)
         val quality=if(selected.first>0) "${selected.first}P"+(if(selected.first>maxQuality) "（兼容资源）" else "") else "自动"
         return StreamInfo(url,key,quality)
     }
@@ -1217,11 +1314,7 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
     fun danmaku(videoId: String, seriesId: String, startMs: Long, durationMs: Long): DanmakuPage {
         require(videoId.matches(Regex("[0-9]{1,30}")) && seriesId.matches(Regex("[0-9]{1,30}")))
         require(startMs>=0 && durationMs>startMs && durationMs<=DANMAKU_MAX_DURATION)
-        val values=linkedMapOf(
-            "aid" to "8662","app_name" to "novelread","channel" to "update_64",
-            "device_platform" to "android","manifest_version_code" to "73532",
-            "update_version_code" to "73532","version_code" to "73532","version_name" to "7.3.5.32"
-        )
+        val values=recentOfficialValues()
         val body=JSONObject()
             .put("comment_source",601).put("server_channel",1000).put("group_id",videoId).put("group_type",30)
             .put("comment_type",20).put("sort",1).put("count",90).put("cursor","").put("aid",8662).put("compliance_status",0)

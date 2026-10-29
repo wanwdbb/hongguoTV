@@ -21,11 +21,11 @@ class Har4CompatibilityTest {
         var calls=0
         val repo=repository { request ->
             calls++
-            assertEquals("/novel/player/multi_video_model/player/v1",request.url.encodedPath)
-            assertEquals("73932",request.url.queryParameter("version_code"))
-            val buffer=okio.Buffer();request.body!!.writeTo(buffer);val body=JSONObject(java.util.zip.GZIPInputStream(buffer.inputStream()).bufferedReader().use { it.readText() })
-            assertEquals("gzip",request.header("Content-Encoding"))
-            assertEquals("player",body.getString("dr_scene"))
+            assertEquals("/novel/player/multi_video_model/preload/v1/",request.url.encodedPath)
+            assertEquals("71332",request.url.queryParameter("version_code"))
+            val buffer=okio.Buffer();request.body!!.writeTo(buffer);val body=JSONObject(buffer.readUtf8())
+            assertNull(request.header("Content-Encoding"))
+            assertFalse(body.has("dr_scene"))
             assertEquals("123",body.getJSONObject("mixed_video_id_map").getJSONArray("1004").getString(0))
             model(JSONArray().put(variant(720,"bytevc2")).put(variant(1080,"bytevc1")))
         }
@@ -43,14 +43,11 @@ class Har4CompatibilityTest {
     @Test fun emptyPlayerResponseHasRecoverableIoError() {
         assertThrows(IOException::class.java) { repository { "" }.stream("123") }
     }
-    @Test fun unavailablePlayerRetainsExistingPreloadCompatibilityRoute() {
+    @Test fun emptyPreloadDoesNotTryNewProtocolsOrRegisterAnotherIdentity() {
         val paths=mutableListOf<String>()
-        val repo=repository { request ->
-            paths+=request.url.encodedPath
-            if(paths.size==1) "" else model(JSONArray().put(variant(720)))
-        }
-        assertEquals("720P",repo.stream("123").quality)
-        assertEquals(listOf("/novel/player/multi_video_model/player/v1","/novel/player/multi_video_model/preload/v1/"),paths)
+        val repo=repository { request -> paths+=request.url.encodedPath; "" }
+        assertThrows(IOException::class.java) { repo.stream("123") }
+        assertEquals(listOf("/novel/player/multi_video_model/preload/v1/"),paths)
     }
     @Test fun encryptedVariantWithoutKeyFailsBeforePlayback() {
         val item=variant(720).put("encrypt_info",JSONObject().put("encrypt",true).put("encryption_method","cenc-aes-ctr"))

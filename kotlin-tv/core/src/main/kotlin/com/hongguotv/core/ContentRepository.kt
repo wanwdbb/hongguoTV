@@ -129,40 +129,10 @@ class SearchSessionExpiredException: IOException("搜索结果已过期，请从
 
 class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectTimeout(15,TimeUnit.SECONDS).readTimeout(30,TimeUnit.SECONDS).callTimeout(45,TimeUnit.SECONDS).build(), private val clock: () -> Long = System::currentTimeMillis) {
     private val signer = Signer()
-    /** App persists successful playback identity recovery without changing the login session. */
+    // Playback uses the 0.9.0 process identity; search/account registration stays separate.
+    private val playbackSigner = Signer(deviceValues = { VendorConstants.playbackDevice })
     var onDeviceRegistration: ((DeviceRegistration) -> Unit)? = null
-    private var lastPlaybackRegistrationNanos: Long? = null
     private class EmptyPlaybackResponse: IOException("播放接口返回空，请稍后重试")
-    private fun <T> recoverPlaybackIdentity(observedDevice: String, original: IOException, fetch: () -> T): T = synchronized(DeviceIdentity) {
-        RequestScope.ensureActive()
-        if(DeviceIdentity.deviceId!=observedDevice) return@synchronized fetch()
-        val now=System.nanoTime()
-        if(lastPlaybackRegistrationNanos?.let { now-it<TimeUnit.MINUTES.toNanos(5) }==true) throw original
-        lastPlaybackRegistrationNanos=now
-        val previous=DeviceRegistration(DeviceIdentity.installId,DeviceIdentity.deviceId)
-        var accepted=false
-        try {
-            repeat(2) {
-                RequestScope.ensureActive()
-                val registration=try { registerDevice() } catch(problem: IOException) {
-                    RequestScope.ensureActive()
-                    throw original
-                }
-                if(!DeviceIdentity.apply(registration.installId,registration.deviceId)) throw original
-                val result=try { fetch() } catch(problem: EmptyPlaybackResponse) {
-                    RequestScope.ensureActive()
-                    return@repeat
-                }
-                RequestScope.ensureActive()
-                onDeviceRegistration?.invoke(registration)
-                accepted=true
-                return@synchronized result
-            }
-            throw original
-        } finally {
-            if(!accepted) DeviceIdentity.apply(previous.installId,previous.deviceId)
-        }
-    }
     private val site = "https://hongguoduanju.com"
     private val authLock=Any()
     private val authCookies=linkedMapOf<String,String>()
@@ -227,10 +197,10 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
         val host=URI(url).host?.lowercase() ?: return@runCatching false
         host=="fqnovel.com" || host.endsWith(".fqnovel.com")
     }.getOrDefault(false)
-    private fun text(url: String, signed: Signer.Request? = null, headers: Map<String,String> = emptyMap()): String {
+    private fun text(url: String, signed: Signer.Request? = null, headers: Map<String,String> = emptyMap(), includeAccount: Boolean = true): String {
         val request = Request.Builder().url(url).header("User-Agent",VendorConstants.VIDEO_UA).header("Accept-Language","zh-CN,zh;q=0.9")
         signed?.headers?.forEach { (k,v) -> request.header(k,v) }
-        if(isOfficialHost(url)) authRequestHeaders().forEach { (k,v) -> request.header(k,v) }
+        if(includeAccount && isOfficialHost(url)) authRequestHeaders().forEach { (k,v) -> request.header(k,v) }
         headers.forEach { (k,v) -> request.header(k,v) }
         signed?.body?.let { request.post(it.toRequestBody("application/json; charset=utf-8".toMediaType())) }
         return RequestScope.execute(http.newCall(request.build())) { response ->
@@ -1243,35 +1213,18 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
     }
     fun stream(id: String, maxQuality: Int = 1080): StreamInfo {
         require(id.matches(Regex("[0-9]{1,30}")))
-        val payload=JSONObject().put("biz_param",JSONObject()
-            .put("detail_page_version",0).put("device_level",3).put("disable_digg_stat",false)
-            .put("disable_video_relate_book",false).put("need_all_video_definition",true)
-            .put("need_mp4_align",false).put("use_os_player",false).put("use_server_dns",false).put("video_platform",1024))
-            .put("dr_scene","player").put("mixed_video_id_map",JSONObject().put("1004",JSONArray().put(id)))
-            .toString().toByteArray(Charsets.UTF_8)
-        val compressed=java.io.ByteArrayOutputStream().also { output -> java.util.zip.GZIPOutputStream(output).use { it.write(payload) } }.toByteArray()
-        fun fetch(endpoint: String,values: Map<String,String>,bytes: ByteArray,headers: Map<String,String>): JSONObject {
-            val signed=signer.sign(endpoint,values,bytes)
-            val response=text(signed.url,signed,headers)
+        // Keep the original N3urda client request contract: old version, exact JSON bytes,
+        // no gzip or account headers. Login remains available for history and library APIs.
+        val payload="""{"biz_param":{"detail_page_version":0,"device_level":3,"disable_digg_stat":false,"need_all_video_definition":true,"need_mp4_align":false,"use_os_player":false,"use_server_dns":false,"video_platform":1024},"mixed_video_id_map":{"1004":["$id"]}}""".toByteArray(Charsets.UTF_8)
+        fun fetch(endpoint: String): JSONObject {
+            val signed=playbackSigner.sign(endpoint,VendorConstants.playbackDevice,payload)
+            val response=text(signed.url,signed,includeAccount=false)
             if(response.isBlank()) throw EmptyPlaybackResponse()
             val result=runCatching { JSONObject(response) }.getOrElse { throw IOException("播放接口格式异常") }
             if(responseCode(result)!=0) throw IOException("播放接口暂不可用")
             return result
         }
-        fun fetchCompatible() = try {
-            fetch("https://api5-normal-sinfonlineb.fqnovel.com/novel/player/multi_video_model/player/v1",
-                recentOfficialValues(),compressed,accountHeaders()+mapOf("Content-Encoding" to "gzip","User-Agent" to VendorConstants.VIDEO_UA.replace("/71332","/73932")))
-        } catch(problem: IOException) {
-            RequestScope.ensureActive()
-            // Some registered devices receive an empty player response. Preserve the existing preload route.
-            fetch("https://api5-normal-sinfonlineb.fqnovel.com/novel/player/multi_video_model/preload/v1/",
-                VendorConstants.device,payload,emptyMap())
-        }
-        val observedDevice=DeviceIdentity.deviceId
-        return try { parseStream(fetchCompatible(),id,maxQuality) } catch(problem: EmptyPlaybackResponse) {
-            RequestScope.ensureActive()
-            recoverPlaybackIdentity(observedDevice,problem) { parseStream(fetchCompatible(),id,maxQuality) }
-        }
+        return parseStream(fetch("https://api5-normal-sinfonlineb.fqnovel.com/novel/player/multi_video_model/preload/v1/"),id,maxQuality)
     }
     private fun parseStream(data: JSONObject,id: String,maxQuality: Int): StreamInfo {
         // A batch may contain neighbours: never silently play another episode.
@@ -1289,7 +1242,7 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
             else -> ""
         }
         if(!fallback.startsWith("https://")) throw IOException("没有电视可播放的清晰度")
-        val resolved=JSONObject(text(fallback))
+        val resolved=JSONObject(text(fallback,includeAccount=false))
         if(responseCode(resolved)!=0) throw IOException("播放地址解析失败")
         val info=resolved.optJSONObject("video_info")?.optJSONObject("data") ?: throw IOException("没有播放资源")
         return streamVariants(info,maxQuality) ?: throw IOException("没有电视可播放的清晰度，请选择其他剧集")

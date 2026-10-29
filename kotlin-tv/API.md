@@ -14,7 +14,7 @@
 
 ## 2026-10-28 HAR4 协议更新
 
-当前播放优先请求 player/v1；空响应、网络或接口错误回退原 preload/v1/。支持直返数组 video_list、嵌套 video_meta/encrypt_info，只有缺少可用直返资源时才请求 fallback_api。网页详情失败时新增 video_detail/v1/ 备用；弹幕使用完整 7.3.9.32 设备版本参数。协议证据、兼容范围和验证边界见 [HAR4 核对](API_HAR4.md)。
+当前播放恢复修复版 0.9.0（7cb06f1）的 preload/v1/ 请求：固定格式未压缩 JSON、进程内稳定的独立播放身份、不附带账号凭据。支持直返数组 video_list、嵌套 video_meta/encrypt_info，只有缺少可用直返资源时才请求 fallback_api。网页详情失败时新增 video_detail/v1/ 备用；弹幕使用完整 7.3.9.32 设备版本参数。协议证据、兼容范围和验证边界见 [HAR4 核对](API_HAR4.md)。
 
 ## 1. 总览
 
@@ -70,7 +70,7 @@ QR_UA       = Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTM
 - `install_id`：随机安装标识；
 - `device_id`：随机设备标识。
 
-App 首次启动时后台调用一次设备注册（见 4.1），成功后写入 SharedPreferences `native-device-v1` 的 `install_id` / `device_id`，之后所有 App 接口复用这份身份。未注册设备调用搜索、弹幕等接口时，服务端可能返回 **HTTP 200 + 空响应体**，代码会转成中文错误提示。
+App 首次启动时后台调用一次设备注册（见 4.1），成功后写入 SharedPreferences `native-device-v1` 的 `install_id` / `device_id`，之后搜索等 App 接口复用这份身份。播放单独保留 0.9.0 的进程级随机 device_id 和固定 iid，不受搜索注册结果影响，也不会因为播放空响应重新注册搜索身份。未注册设备调用搜索、弹幕等接口时，服务端可能返回 **HTTP 200 + 空响应体**，代码会转成中文错误提示。
 
 ### 2.3 App 接口签名
 
@@ -581,7 +581,7 @@ User-Agent: VIDEO_UA
 - `fallback_api` 可能是字符串、对象里的 `fallback_api` 字段，或数组第一个元素；
 - `fallback_api` 必须以 `https://` 开头；
 
-HAR4 更新：正式 player 路径与 gzip 请求体优先，dr_scene=player；上方 preload 与旧响应示例保留为兼容分支说明。新响应 video_list 是数组，编码/清晰度位于 video_meta，加密信息位于 encrypt_info。video_model.status=10 在本次抓包中是正常资源模型，不等同于顶层 API code。
+历史 HAR4 抓包包含 player 路径、gzip 请求体和 dr_scene=player；这些是抓包证据，不是当前播放请求契约。当前实现恢复 0.9.0 的 preload 与未压缩请求体。新响应 video_list 是数组，编码/清晰度位于 video_meta，加密信息位于 encrypt_info。video_model.status=10 在本次抓包中是正常资源模型，不等同于顶层 API code。
 
 #### 4.4.2 播放地址明细
 
@@ -1025,7 +1025,7 @@ GET search/tab/v（第 1 页，is_first_enter_search=true）
 
 ```
 GET /detail?series_id=...（拿 vid_list）
-  → POST multi_video_model/player/v1（gzip，7.3.9.32；失败回退 preload/v1/）
+  → POST multi_video_model/preload/v1/（未压缩 JSON，7.1.3.32，独立进程播放身份，无账号凭据）
   → 解析直返 video_list；无可用资源时 GET fallback_api
   → 解密 main_url（key_seed）
   → GET main_url（Range + Referer）

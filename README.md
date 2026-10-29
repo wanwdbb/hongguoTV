@@ -95,3 +95,7 @@ npm run build:android
 项目与红果官方无关联。内容接口为非官方实现，平台变化可能导致失效；错误会明确显示，不会替换为虚假内容。
 
 Node 服务使用固定提交的 `drpys` 源，保留原文件、GPL-3.0 许可证和来源记录，见 [第三方说明](server/vendor/NOTICE.md)。Android / tvOS 工程骨架源于 MIT 许可的 RN TV 模板。本项目代码按 [GPL-3.0](LICENSE) 提供，第三方部分保留各自许可。
+
+### 播放兼容修复（本地候选）
+
+播放请求以修复版 0.9.0（`7cb06f1`）为基准，恢复 preload、原始 JSON 和独立进程播放身份，避免搜索注册及账号凭据改变播放请求。保留账号、进度合并与 Downloads 更新目录。验证结果见 [播放兼容修复](kotlin-tv/PLAYBACK_LEGACY_FIX.md)。

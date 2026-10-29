@@ -6,85 +6,45 @@ import org.junit.Assert.*
 import org.junit.Test
 import java.io.IOException
 
+/** Regression: search registration must not replace the working 0.9.0 playback context. */
 class PlaybackIdentityRecoveryTest {
-    private val media="""{"code":0,"data":{"123":{"video_model":{"video_list":[{"main_url":"https://example.invalid/video.mp4","video_meta":{"vheight":720,"codec_type":"h264"}}]}}}}"""
-    private fun repository(reply: (Request)->String)=ContentRepository(OkHttpClient.Builder().addInterceptor { chain ->
-        Response.Builder().request(chain.request()).protocol(Protocol.HTTP_1_1).code(200).message("OK")
-            .body(reply(chain.request()).toResponseBody()).build()
-    }.build())
     private fun isolated(action: ()->Unit) = synchronized(DeviceIdentity) {
-        val install=DeviceIdentity.installId;val device=DeviceIdentity.deviceId
-        try { DeviceIdentity.apply("111","222");action() } finally { DeviceIdentity.apply(install,device) }
+        val install=DeviceIdentity.installId;val device=DeviceIdentity.deviceId;val registered=DeviceIdentity.registered
+        try {DeviceIdentity.apply("111","222");action()}finally {DeviceIdentity.apply(install,device);DeviceIdentity::class.java.getDeclaredField("registeredValue").apply {isAccessible=true}.setBoolean(DeviceIdentity,registered)}
     }
-    @Test fun emptyRoutesRegisterResignPersistAndRetainAccount() = isolated {
-        var registrations=0;var saved: DeviceRegistration?=null
-        val repo=repository { request ->
-            if(request.url.encodedPath.contains("device_register")) {
-                registrations++; """{"install_id":"333","device_id":"444"}"""
-            } else {
-                assertEquals("fixture",request.header("X-Tt-Token"))
-                if(request.url.queryParameter("device_id")=="222") "" else media
-            }
-        }
-        val session=AuthSession(emptyMap(),"fixture",AuthUser("fixture","fixture",accountId="123"))
-        repo.restoreSession(session);repo.onDeviceRegistration={ saved=it }
-        assertEquals("https://example.invalid/video.mp4",repo.stream("123").url)
-        assertEquals(1,registrations);assertEquals("444",saved?.deviceId)
-        assertEquals(session,repo.currentSession())
-        repo.stream("123");assertEquals(1,registrations)
+    @Test fun searchRegistrationCannotChangePlaybackIdentityOrSignatures() = isolated {
+        val playback=VendorConstants.playbackDevice
+        val url="https://example.invalid/api?video=123"
+        fun signature()=Signer(clock={1800500000000L},random={0.25},deviceValues={VendorConstants.playbackDevice}).sign(url.substringBefore('?' ),VendorConstants.playbackDevice,"{}".toByteArray()).headers
+        val original=signature()
+        DeviceIdentity.apply("333","444")
+        assertEquals(playback,VendorConstants.playbackDevice)
+        assertEquals(original,signature())
+        assertEquals("444",VendorConstants.device.getValue("device_id"))
     }
-    @Test fun persistentEmptyIsBoundedAcrossPlayerRetries() = isolated {
-        var registrations=0;var requests=0
-        val repo=repository { request ->
-            if(request.url.encodedPath.contains("device_register")) {
-                registrations++; """{"install_id":"333","device_id":"444"}"""
-            } else { requests++;"" }
-        }
-        repeat(4) { assertThrows(IOException::class.java) { repo.stream("123") } }
-        assertEquals(2,registrations);assertEquals(12,requests)
+    @Test fun emptyPlaybackNeverRotatesOrPersistsSearchIdentity() = isolated {
+        var registrations=0;var persisted=0;var requests=0
+        val repo=ContentRepository(OkHttpClient.Builder().addInterceptor {chain->
+            if(chain.request().url.encodedPath.contains("device_register")) registrations++
+            requests++
+            Response.Builder().request(chain.request()).protocol(Protocol.HTTP_1_1).code(200).message("OK").body("".toResponseBody()).build()
+        }.build())
+        repo.onDeviceRegistration={persisted++}
+        repeat(4){assertThrows(IOException::class.java){repo.stream("123")}}
+        assertEquals(4,requests);assertEquals(0,registrations);assertEquals(0,persisted)
         assertEquals("222",DeviceIdentity.deviceId)
     }
-    @Test fun registrationFailureKeepsIdentityAndDoesNotLoop() = isolated {
-        var registrations=0
-        val repo=repository { request ->
-            if(request.url.encodedPath.contains("device_register")) { registrations++;"{}" } else ""
-        }
-        repeat(2) { assertThrows(IOException::class.java) { repo.stream("123") } }
-        assertEquals(1,registrations);assertEquals("222",DeviceIdentity.deviceId)
-    }
-    @Test fun networkFailureDoesNotRotateIdentity() = isolated {
-        var registrations=0
-        val repo=repository { request ->
-            if(request.url.encodedPath.contains("device_register")) registrations++
-            throw IOException("offline")
-        }
-        assertThrows(IOException::class.java) { repo.stream("123") }
-        assertEquals(0,registrations);assertEquals("222",DeviceIdentity.deviceId)
-    }
-    @Test fun firstRegisteredIdentityStillEmptySecondWorksAndOnlySuccessIsSaved() = isolated {
-        var registrations=0
-        val saved=mutableListOf<String>()
-        val repo=repository { request ->
-            if(request.url.encodedPath.contains("device_register")) {
-                registrations++
-                """{"install_id":"333","device_id":"${if(registrations==1) "444" else "555"}"}"""
-            } else if(request.url.queryParameter("device_id")=="555") media else ""
-        }
-        repo.onDeviceRegistration={ saved+=it.deviceId }
-        assertEquals("https://example.invalid/video.mp4",repo.stream("123").url)
-        assertEquals(2,registrations);assertEquals(listOf("555"),saved)
-        repo.stream("123");assertEquals(2,registrations)
-    }
-    @Test fun invalidModelNeverPersistsCandidateIdentity() = isolated {
-        val repo=repository { request ->
-            when {
-                request.url.encodedPath.contains("device_register") -> """{"install_id":"333","device_id":"444"}"""
-                request.url.queryParameter("device_id")=="222" -> ""
-                else -> """{"code":0,"data":{}}"""
-            }
-        }
-        var saved=false;repo.onDeviceRegistration={ saved=true }
-        assertThrows(IOException::class.java) { repo.stream("123") }
-        assertFalse(saved);assertEquals("222",DeviceIdentity.deviceId)
+    @Test fun signedQueryRemainsOnPlaybackContextAfterSearchIdentityChanges() = isolated {
+        val expected=VendorConstants.playbackDevice
+        val repo=ContentRepository(OkHttpClient.Builder().addInterceptor {chain->
+            assertEquals(expected.getValue("device_id"),chain.request().url.queryParameter("device_id"))
+            assertEquals(expected.getValue("iid"),chain.request().url.queryParameter("iid"))
+            Response.Builder().request(chain.request()).protocol(Protocol.HTTP_1_1).code(200).message("OK")
+                .body("""{"code":0,"data":{"123":{"video_model":{"video_list":[{"main_url":"https://example.invalid/video.mp4","height":720}]}}}}""".toResponseBody()).build()
+        }.build())
+        repo.stream("123")
+        DeviceIdentity.apply("333","444")
+        repo.stream("123")
+        assertEquals("444",DeviceIdentity.deviceId)
     }
 }

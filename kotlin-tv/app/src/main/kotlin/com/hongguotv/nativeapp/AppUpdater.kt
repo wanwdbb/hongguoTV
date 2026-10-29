@@ -9,6 +9,8 @@ import android.content.pm.PackageManager
 import android.net.ConnectivityManager
 import android.net.Uri
 import android.os.Build
+import android.os.Environment
+import android.Manifest
 import android.os.Handler
 import android.os.Looper
 import android.provider.Settings
@@ -32,7 +34,9 @@ class AppUpdater(private val activity: Activity, private val idle: () -> Boolean
     private val worker = Executors.newSingleThreadExecutor()
     private val repository = AppUpdateRepository()
     private val preferences = activity.getSharedPreferences("app_updates", Activity.MODE_PRIVATE)
-    private val apk = File(activity.cacheDir, "updates/update.apk")
+    @Suppress("DEPRECATION")
+    private val apk = File(Environment.getExternalStorageDirectory(), "Downloads/hongguotv-update.apk")
+    private val installApk = File(activity.cacheDir, "updates/install.apk")
     private var task: Future<*>? = null
     private var generation = 0
     private var active = false
@@ -40,6 +44,34 @@ class AppUpdater(private val activity: Activity, private val idle: () -> Boolean
     private var available: AppUpdate? = null
     private var ready = false
     private var permissionRequested = false
+    private var storagePermissionRequested = false
+    private val storageRequestCode = 4102
+    private fun storageAllowed() = if(Build.VERSION.SDK_INT >= 30) Environment.isExternalStorageManager()
+        else activity.checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE)==PackageManager.PERMISSION_GRANTED
+    fun onRequestPermissionsResult(requestCode: Int) {
+        if(requestCode!=storageRequestCode) return
+        if(active) {
+            storagePermissionRequested=false
+            continueAfterStoragePermission()
+        }
+    }
+    private fun continueAfterStoragePermission() {
+        if(storageAllowed()) download(true)
+        else { updateStatus("未获得文件访问权限，无法保存更新到 ${apk.parent}；可按「下载新版」重新授权。"); show(anchor) }
+    }
+    private fun requestStoragePermission() {
+        storagePermissionRequested=true
+        try {
+            if(Build.VERSION.SDK_INT >= 30) {
+                val intent=Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,Uri.parse("package:${activity.packageName}"))
+                try { activity.startActivity(intent) }
+                catch(_: android.content.ActivityNotFoundException) { activity.startActivity(Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION)) }
+            } else activity.requestPermissions(arrayOf(Manifest.permission.WRITE_EXTERNAL_STORAGE),storageRequestCode)
+        } catch(_: Exception) {
+            storagePermissionRequested=false
+            updateStatus("电视未提供文件授权入口，无法保存到 ${apk.parent}。请在系统设置中开启文件访问权限。")
+        }
+    }
     private var dialog: AlertDialog? = null
     val showing get() = dialog?.isShowing == true
     private var statusView: TextView? = null
@@ -68,6 +100,10 @@ class AppUpdater(private val activity: Activity, private val idle: () -> Boolean
     }
     fun resume() {
         active = true; main.removeCallbacks(poll); main.postDelayed(poll, 8000)
+        if(storagePermissionRequested) {
+            storagePermissionRequested=false
+            continueAfterStoragePermission()
+        }
         if (permissionRequested) {
             permissionRequested = false
             if (activity.packageManager.canRequestPackageInstalls()) install()
@@ -192,7 +228,7 @@ class AppUpdater(private val activity: Activity, private val idle: () -> Boolean
             available = update.takeIf { it.newerThan(BuildConfig.VERSION_CODE.toLong(), Build.VERSION.SDK_INT) }; ready = false
             if (available == null) {
                 updateStatus(if (update.versionCode > BuildConfig.VERSION_CODE && update.minSdk > Build.VERSION.SDK_INT) "新版需要 Android API ${update.minSdk}，当前电视继续使用本版" else "已是最新版本 ${BuildConfig.VERSION_NAME}")
-                worker.execute { apk.delete() }
+                worker.execute { installApk.delete() }
             } else {
                 val notes = prettyNotes(update.notes)
                 updateStatus("发现 ${update.versionName} · ${"%.1f".format(update.size/1048576.0)} MB\n$notes")
@@ -208,18 +244,27 @@ class AppUpdater(private val activity: Activity, private val idle: () -> Boolean
     private fun download(manual: Boolean) {
         val update = available ?: return
         if (busy || !active || !idle()) return
+        if(!storageAllowed()) {
+            updateStatus("下载更新需要文件访问权限，安装包保存到 ${apk.path}。")
+            if(manual) requestStoragePermission()
+            else {
+                retryAfter=System.currentTimeMillis()+30*60*1000L
+                if(dialog==null && promptedCode!=update.versionCode) { promptedCode=update.versionCode; show(activity.currentFocus) }
+            }
+            return
+        }
         updateStatus("正在下载 ${update.versionName}…")
         val ticket = generation + 1
         work({
             repository.download(update, apk) { percent -> main.post { if (generation == ticket && active) updateStatus("正在下载 ${update.versionName} · $percent%") } }
             validateApk(update)
         }) {
-            ready = true; updateStatus("${update.versionName} 已下载并校验\n${prettyNotes(update.notes)}\n\n确认后由系统覆盖安装，保留本机记录。")
+            ready = true; updateStatus("${update.versionName} 已下载并校验\n保存位置：${apk.path}\n${prettyNotes(update.notes)}\n\n确认后由系统覆盖安装，保留本机记录。")
             if (idle() && dialog == null && (manual || !deferred(update))) { promptedCode = update.versionCode; show(activity.currentFocus) }
         }
     }
     @Suppress("DEPRECATION")
-    private fun validateApk(update: AppUpdate) {
+    private fun validateApk(update: AppUpdate, apk: File = this.apk) {
         if (!UpdateFiles.verify(apk, update)) throw IOException("安装包校验未通过，请重新下载")
         val pm = activity.packageManager
         val flags = if (Build.VERSION.SDK_INT >= 28) PackageManager.GET_SIGNING_CERTIFICATES else PackageManager.GET_SIGNATURES
@@ -235,13 +280,18 @@ class AppUpdater(private val activity: Activity, private val idle: () -> Boolean
     private fun install() {
         val update = available ?: return
         if (busy || !active || !ready) return
-        work({ validateApk(update) }) {
+        work({
+            // Shared storage can change externally. Install only a freshly checked private copy.
+            installApk.parentFile?.mkdirs()
+            apk.copyTo(installApk,overwrite=true)
+            validateApk(update,installApk)
+        }) {
             try {
                 if (!activity.packageManager.canRequestPackageInstalls()) {
                     permissionRequested = true
                     activity.startActivity(Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:${activity.packageName}")))
                 } else {
-                    val uri = FileProvider.getUriForFile(activity, "${activity.packageName}.updates", apk)
+                    val uri = FileProvider.getUriForFile(activity, "${activity.packageName}.updates", installApk)
                     activity.startActivity(Intent(Intent.ACTION_VIEW).setDataAndType(uri, "application/vnd.android.package-archive")
                         .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION).apply { clipData = ClipData.newRawUri("更新安装包", uri) })
                 }

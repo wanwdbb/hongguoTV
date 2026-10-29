@@ -133,18 +133,35 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
     var onDeviceRegistration: ((DeviceRegistration) -> Unit)? = null
     private var lastPlaybackRegistrationNanos: Long? = null
     private class EmptyPlaybackResponse: IOException("播放接口返回空，请稍后重试")
-    private fun recoverPlaybackIdentity(observedDevice: String): Boolean = synchronized(DeviceIdentity) {
-        if(DeviceIdentity.deviceId!=observedDevice) return@synchronized true
+    private fun <T> recoverPlaybackIdentity(observedDevice: String, original: IOException, fetch: () -> T): T = synchronized(DeviceIdentity) {
+        RequestScope.ensureActive()
+        if(DeviceIdentity.deviceId!=observedDevice) return@synchronized fetch()
         val now=System.nanoTime()
-        if(lastPlaybackRegistrationNanos?.let { now-it<TimeUnit.MINUTES.toNanos(5) }==true) return@synchronized false
+        if(lastPlaybackRegistrationNanos?.let { now-it<TimeUnit.MINUTES.toNanos(5) }==true) throw original
         lastPlaybackRegistrationNanos=now
-        val registration=try { registerDevice() } catch(problem: IOException) {
-            RequestScope.ensureActive()
-            return@synchronized false
+        val previous=DeviceRegistration(DeviceIdentity.installId,DeviceIdentity.deviceId)
+        var accepted=false
+        try {
+            repeat(2) {
+                RequestScope.ensureActive()
+                val registration=try { registerDevice() } catch(problem: IOException) {
+                    RequestScope.ensureActive()
+                    throw original
+                }
+                if(!DeviceIdentity.apply(registration.installId,registration.deviceId)) throw original
+                val result=try { fetch() } catch(problem: EmptyPlaybackResponse) {
+                    RequestScope.ensureActive()
+                    return@repeat
+                }
+                RequestScope.ensureActive()
+                onDeviceRegistration?.invoke(registration)
+                accepted=true
+                return@synchronized result
+            }
+            throw original
+        } finally {
+            if(!accepted) DeviceIdentity.apply(previous.installId,previous.deviceId)
         }
-        if(!DeviceIdentity.apply(registration.installId,registration.deviceId)) return@synchronized false
-        onDeviceRegistration?.invoke(registration)
-        true
     }
     private val site = "https://hongguoduanju.com"
     private val authLock=Any()
@@ -1251,12 +1268,12 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
                 VendorConstants.device,payload,emptyMap())
         }
         val observedDevice=DeviceIdentity.deviceId
-        val data=try { fetchCompatible() } catch(problem: EmptyPlaybackResponse) {
+        return try { parseStream(fetchCompatible(),id,maxQuality) } catch(problem: EmptyPlaybackResponse) {
             RequestScope.ensureActive()
-            if(!recoverPlaybackIdentity(observedDevice)) throw problem
-            // Re-sign both routes with the newly registered identity; retry at most once.
-            fetchCompatible()
+            recoverPlaybackIdentity(observedDevice,problem) { parseStream(fetchCompatible(),id,maxQuality) }
         }
+    }
+    private fun parseStream(data: JSONObject,id: String,maxQuality: Int): StreamInfo {
         // A batch may contain neighbours: never silently play another episode.
         val entry=data.optJSONObject("data")?.optJSONObject(id) ?: throw IOException("播放信息缺少当前分集")
         val model=entry.optJSONObject("video_model") ?: runCatching { JSONObject(entry.str("video_model")) }.getOrNull()

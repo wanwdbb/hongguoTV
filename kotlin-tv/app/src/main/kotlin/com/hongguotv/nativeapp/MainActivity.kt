@@ -2465,7 +2465,16 @@ class MainActivity: Activity() {
             addButton(controls,"停止自动重试") { cancelRecovery(); playbackText.text="自动重试已停止，观看位置已保留。" }
             autoRecovery=true; scheduleRecovery()
         }
-        android.util.Log.w("HongguoTV","Playback failure: ${problem.javaClass.simpleName}"+(if(problem is PlaybackException) " code=${problem.errorCodeName}" else ""))
+        val knownReasons=mapOf(
+            "播放接口返回空，请稍后重试" to "empty_playback_response",
+            "播放接口格式异常" to "invalid_playback_json",
+            "播放接口暂不可用" to "playback_api_error",
+            "播放信息缺少当前分集" to "missing_episode",
+            "播放模型格式异常" to "invalid_playback_model",
+            "视频缓冲超时" to "buffer_timeout")
+        val reason=generateSequence(problem as Throwable?) { it.cause }.take(8)
+            .mapNotNull { knownReasons[it.message] }.firstOrNull() ?: "other"
+        android.util.Log.w("HongguoTV","Playback failure reason=$reason"+(if(problem is PlaybackException) " code=${problem.errorCodeName}" else ""))
     }
     private fun hidePlaybackOverlay() {
         main.removeCallbacks(hideHud)
@@ -2982,6 +2991,10 @@ class MainActivity: Activity() {
         revealFeedChrome()
     }
     @Deprecated("TV remote back is handled through the activity")
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+        super.onRequestPermissionsResult(requestCode,permissions,grantResults)
+        updater.onRequestPermissionsResult(requestCode)
+    }
     override fun onBackPressed()=goBack()
     /** 不同遥控器把「菜单」映射成不同按键：MENU、INFO、内容菜单或红/蓝功能键。 */
     private fun isMenuKey(key: Int)=key==KeyEvent.KEYCODE_MENU || key==KeyEvent.KEYCODE_INFO ||

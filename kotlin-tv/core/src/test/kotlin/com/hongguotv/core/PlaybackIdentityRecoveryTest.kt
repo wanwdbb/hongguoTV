@@ -41,7 +41,8 @@ class PlaybackIdentityRecoveryTest {
             } else { requests++;"" }
         }
         repeat(4) { assertThrows(IOException::class.java) { repo.stream("123") } }
-        assertEquals(1,registrations);assertEquals(10,requests)
+        assertEquals(2,registrations);assertEquals(12,requests)
+        assertEquals("222",DeviceIdentity.deviceId)
     }
     @Test fun registrationFailureKeepsIdentityAndDoesNotLoop() = isolated {
         var registrations=0
@@ -59,5 +60,31 @@ class PlaybackIdentityRecoveryTest {
         }
         assertThrows(IOException::class.java) { repo.stream("123") }
         assertEquals(0,registrations);assertEquals("222",DeviceIdentity.deviceId)
+    }
+    @Test fun firstRegisteredIdentityStillEmptySecondWorksAndOnlySuccessIsSaved() = isolated {
+        var registrations=0
+        val saved=mutableListOf<String>()
+        val repo=repository { request ->
+            if(request.url.encodedPath.contains("device_register")) {
+                registrations++
+                """{"install_id":"333","device_id":"${if(registrations==1) "444" else "555"}"}"""
+            } else if(request.url.queryParameter("device_id")=="555") media else ""
+        }
+        repo.onDeviceRegistration={ saved+=it.deviceId }
+        assertEquals("https://example.invalid/video.mp4",repo.stream("123").url)
+        assertEquals(2,registrations);assertEquals(listOf("555"),saved)
+        repo.stream("123");assertEquals(2,registrations)
+    }
+    @Test fun invalidModelNeverPersistsCandidateIdentity() = isolated {
+        val repo=repository { request ->
+            when {
+                request.url.encodedPath.contains("device_register") -> """{"install_id":"333","device_id":"444"}"""
+                request.url.queryParameter("device_id")=="222" -> ""
+                else -> """{"code":0,"data":{}}"""
+            }
+        }
+        var saved=false;repo.onDeviceRegistration={ saved=true }
+        assertThrows(IOException::class.java) { repo.stream("123") }
+        assertFalse(saved);assertEquals("222",DeviceIdentity.deviceId)
     }
 }

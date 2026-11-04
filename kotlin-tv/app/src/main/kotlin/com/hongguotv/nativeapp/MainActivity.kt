@@ -2313,7 +2313,7 @@ class MainActivity: Activity() {
                         saveProgress(true)
                         if(sleepTimer.episodeEnded()) stopForSleep()
                         else if(foreground && requestedAutoplay && !pausedForLifecycle && library.autoNext && episodeIndex<data.episodes.lastIndex) playEpisode(episodeIndex+1)
-                        else if(foreground && requestedAutoplay && !pausedForLifecycle && library.autoNext && feedMode) switchFeed(1)
+                        else if(foreground && requestedAutoplay && !pausedForLifecycle && library.autoNext) continueNextSeason(data,p,generation)
                         else { requestedAutoplay=false; p.pause(); playbackText.text="本集已结束"; showPanel() }
                     }
                 }
@@ -2352,6 +2352,41 @@ class MainActivity: Activity() {
         cancelFeedPrefetch()
     }
     /** 停下正在准备的相邻剧集；已经准备好的留着，换回来还能直接用。 */
+    /** Resolve a numbered next season before falling back to the recommendation feed. */
+    private fun continueNextSeason(ended: Detail, endedPlayer: ExoPlayer, endedGeneration: Int) {
+        fun active()=screen==Screen.PLAYER && detail?.series?.id==ended.series.id &&
+            player===endedPlayer && generation==endedGeneration && foreground &&
+            requestedAutoplay && !pausedForLifecycle && library.autoNext && endedPlayer.playbackState==Player.STATE_ENDED
+        fun finish() {
+            if(!active()) return
+            if(feedMode) switchFeed(1)
+            else {requestedAutoplay=false;endedPlayer.pause();playbackText.text="本季已结束，暂无可续播的下一季";showPanel()}
+        }
+        val query=SeasonContinuation.query(ended.series.title)
+        if(query==null) {finish();return}
+        playbackText.text="本季已结束，正在查找下一季…";showHud()
+        work({
+            val candidates=ended.related.toMutableList()
+            val type=if(ended.series.bookType in 3..5) ContentType.COMIC else ContentType.SHORT
+            for(page in 1..3) {
+                val result=repository.search(query,page,type)
+                candidates.addAll(result.items)
+                if(!result.hasMore) break
+            }
+            SeasonContinuation.select(ended.series,candidates)?.let {candidate->
+                repository.detail(candidate.id).takeIf {it.episodes.isNotEmpty() && SeasonContinuation.select(ended.series,listOf(it.series))!=null}
+            }
+        }, {next->
+            if(!active()) return@work
+            if(next==null) {finish();return@work}
+            detail=next
+            library.observeFavorite(next.series.id,next.episodes.size,System.currentTimeMillis(),acknowledge=true)
+            if(feedMode) {feedSeriesId=next.series.id;catalog.indexOfFirst {it.id==next.series.id}.takeIf {it>=0}?.let {feedIndex=it}}
+            Toast.makeText(this,"正在续播《${next.series.title}》",Toast.LENGTH_LONG).show()
+            playEpisode(0,0,autoplay=true,saveCurrent=false)
+        }, {if(active()) {Toast.makeText(this,"下一季暂时加载失败",Toast.LENGTH_SHORT).show();finish()}})
+    }
+
     private fun cancelFeedPrefetch() {
         feedPrefetchEpoch++; feedPrefetchJob?.cancel(true); feedPrefetchJob=null; feedPrefetchMark=""
     }

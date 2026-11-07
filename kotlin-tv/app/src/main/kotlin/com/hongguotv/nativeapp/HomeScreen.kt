@@ -55,6 +55,7 @@ class HomeScreen(
     private val rows=mutableListOf<Row>()
     private val cards=linkedMapOf<String,Card>()
     private var shelves=emptyList<Shelf>()
+    private var stream: StreamingPosterGrid?=null
     private var footerMore: (() -> Unit)?=null
     private var moreButton: View?=null
     private var lastFocus=""
@@ -62,8 +63,28 @@ class HomeScreen(
     private var restoring=false
     private var revision=0
     val refresh=label("正在更新热门…",13f).apply { id=View.generateViewId(); tag="home:refresh"; isFocusable=true; isFocusableInTouchMode=true; gravity=Gravity.CENTER_VERTICAL; setPadding(dp(12),dp(8),dp(12),dp(8)); background=shape(false); setOnFocusChangeListener { _,f -> background=shape(f); if(f) lastFocus=tag.toString() } }
-    init { orientation=VERTICAL; scroll.addView(contents); addView(scroll,LayoutParams(-1,0,1f)) }
+    init {
+        orientation=VERTICAL; scroll.addView(contents); addView(scroll,LayoutParams(-1,0,1f))
+        scroll.setOnScrollChangeListener { _,_,y,_,old ->
+            loadVisibleArtwork(); stream?.updateViewport()
+            if(!restoring && y>old && contents.height-y-scroll.height<scroll.height/2) stream?.requestNext()
+            if(!restoring && y>old && contents.height-y-scroll.height<scroll.height/2) footerMore?.invoke()
+        }
+        refresh.setOnKeyListener { _,key,event ->
+            if(key==KeyEvent.KEYCODE_DPAD_DOWN && event.action==KeyEvent.ACTION_DOWN) { footerMore?.invoke(); false } else false
+        }
+    }
 
+    internal fun installStream(grid: StreamingPosterGrid) {
+        stream=grid;grid.outerScroll=scroll
+        contents.addView(grid,LayoutParams(-1,-2).apply { topMargin=dp(12) })
+        rows.lastOrNull()?.cards?.forEach { card -> card.view.setOnKeyListener { _,key,event ->
+            if(key==KeyEvent.KEYCODE_DPAD_DOWN && event.action==KeyEvent.ACTION_DOWN) { grid.first()?.requestFocus() ?: false }
+            else if(key==KeyEvent.KEYCODE_MENU) { if(event.action==KeyEvent.ACTION_UP) card.entry?.let { actions(it.series,card.view) };true } else false
+        } }
+        refresh.setOnKeyListener { _,key,event -> if(key==KeyEvent.KEYCODE_DPAD_DOWN && event.action==KeyEvent.ACTION_DOWN) { grid.first()?.requestFocus() ?: false } else false }
+        grid.post { grid.updateViewport() }
+    }
     fun capturePosition(): Position {
         val key=findFocus()?.tag?.toString()?.takeIf { it in cards || it=="home:refresh" || it=="home:more" } ?: lastFocus
         val row=rows.indexOfFirst { item -> item.cards.any { it.key==key } }
@@ -156,13 +177,13 @@ class HomeScreen(
             shelf.more?.let { action -> addCard(null,action) }
             contents.addView(block,rows.size,LayoutParams(-1,-2).apply { bottomMargin=dp(16) }); retained+=block; rows+=Row(shelf.key,block,horizontal,rowCards)
         }
+        stream?.let { retained+=it }
         (contents.childCount-1 downTo 0).forEach { index -> if(contents.getChildAt(index) !in retained) contents.removeViewAt(index) }
         if(cards.isEmpty()) contents.addView(label("还没有本机记录，热门剧加载后可选择观看。",15f).apply { setPadding(0,dp(16),0,dp(16)) })
         contents.addView(refresh,LayoutParams(-1,-2).apply { topMargin=dp(10) })
         val footer=mutableListOf<View>(refresh)
         if(more!=null) {
-            val next=label("更多热门  ›",15f).apply { id=View.generateViewId(); tag="home:more"; isFocusable=true; isFocusableInTouchMode=true; setPadding(dp(12),dp(12),dp(12),dp(12)); background=shape(false); setOnFocusChangeListener { _,f -> background=shape(f); if(f) lastFocus=tag.toString() }; setOnClickListener { more() } }
-            contents.addView(next,LayoutParams(-1,-2).apply { topMargin=dp(8) }); footer+=next; moreButton=next
+            contents.addView(label("继续向下浏览 · 自动加载热门",12f,TvStyle.muted),LayoutParams(-1,-2).apply { topMargin=dp(8) })
         }
         rows.forEachIndexed { i,row -> row.cards.forEachIndexed { j,card ->
             card.view.nextFocusLeftId=row.cards[(j-1).coerceAtLeast(0)].view.id; card.view.nextFocusRightId=row.cards[(j+1).coerceAtMost(row.cards.lastIndex)].view.id
@@ -182,7 +203,7 @@ class HomeScreen(
                 if(previous!=null) restoreOffsets(previous)
                 restoring=false
                 if(requestFocus && previous==null) rows.firstOrNull { row -> row.cards.any { it.view===target } }?.let { revealSelection(it) }
-                loadNearbySelection()
+                loadNearbySelection(); loadVisibleArtwork()
             }
         }
     }
@@ -229,6 +250,15 @@ class HomeScreen(
         val column=rows.getOrNull(row)?.cards?.indexOfFirst { it.key==lastFocus }?.coerceAtLeast(0) ?: 0
         rows.getOrNull(row)?.cards?.let { items -> for(index in (column-1).coerceAtLeast(0)..(column+6).coerceAtMost(items.lastIndex)) requestCover(items[index]) }
         rows.getOrNull(row+1)?.cards?.take(6)?.forEach(::requestCover)
+    }
+    private fun loadVisibleArtwork() {
+        val start=scroll.scrollY-dp(60)
+        val end=scroll.scrollY+scroll.height+dp(100)
+        rows.filter { it.block.bottom>=start && it.block.top<=end }.forEach { row ->
+            val left=row.horizontal.scrollX
+            val right=left+row.horizontal.width
+            row.cards.filter { it.view.right>=left && it.view.left<=right && it.image?.drawable==null }.forEach(::requestCover)
+        }
     }
     private fun requestCover(card: Card) {
         val image=card.image ?: return

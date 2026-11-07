@@ -19,4 +19,11 @@ class SeasonContinuationTest {
   assertEquals(20,SeasonContinuation.parse("修仙 第二十季")?.season)
   assertEquals(101,SeasonContinuation.parse("修仙 第一百零一季")?.season)
  }
+ @Test fun actualSeason26ContinuesTo27WithoutSkippingOrUsingPreview(){
+  val from=Series("7678692101244062745","谁说没灵根不能修仙的？之无灵证道第26季")
+  val next=Series("7679476009350990873","谁说没灵根不能修仙的？之无灵证道第27季")
+  val later=next.copy(id="28",title=next.title.replace("27","28"))
+  assertEquals(next,SeasonContinuation.select(from,listOf(from,later,next,next)))
+  assertNull(SeasonContinuation.select(from,listOf(later,next.copy(preview=true))))
+ }
 }

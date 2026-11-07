@@ -12,7 +12,7 @@ class Har4CompatibilityTest {
     private fun repository(reply: (Request)->String)=ContentRepository(OkHttpClient.Builder().addInterceptor { chain ->
         Response.Builder().request(chain.request()).protocol(Protocol.HTTP_1_1).code(200).message("OK")
             .body(reply(chain.request()).toResponseBody()).build()
-    }.build())
+    }.build(),playbackSession=playbackFixture())
     private fun variant(height: Int,codec: String="h264")=JSONObject().put("main_url","https://example.invalid/$height.mp4")
         .put("video_meta",JSONObject().put("definition","${height}p").put("vheight",height).put("codec_type",codec).put("vtype","mp4"))
     private fun model(list: JSONArray)=JSONObject().put("code",0).put("data",JSONObject().put("123",JSONObject()
@@ -21,12 +21,12 @@ class Har4CompatibilityTest {
         var calls=0
         val repo=repository { request ->
             calls++
-            assertEquals("/novel/player/multi_video_model/preload/v1/",request.url.encodedPath)
-            assertEquals("71332",request.url.queryParameter("version_code"))
-            val buffer=okio.Buffer();request.body!!.writeTo(buffer);val body=JSONObject(buffer.readUtf8())
+            assertEquals("/reading/bookapi/video_tab/multi_video_model/v1/",request.url.encodedPath)
+            assertEquals("73932",request.url.queryParameter("version_code"))
+            assertEquals("GET",request.method)
             assertNull(request.header("Content-Encoding"))
-            assertFalse(body.has("dr_scene"))
-            assertEquals("123",body.getJSONObject("mixed_video_id_map").getJSONArray("1004").getString(0))
+            assertNull(request.url.queryParameter("dr_scene"))
+            assertEquals("123",request.url.queryParameter("video_id"))
             model(JSONArray().put(variant(720,"bytevc2")).put(variant(1080,"bytevc1")))
         }
         assertEquals("1080P（兼容资源）",repo.stream("123",720).quality)
@@ -43,11 +43,12 @@ class Har4CompatibilityTest {
     @Test fun emptyPlayerResponseHasRecoverableIoError() {
         assertThrows(IOException::class.java) { repository { "" }.stream("123") }
     }
-    @Test fun emptyPreloadDoesNotTryNewProtocolsOrRegisterAnotherIdentity() {
+    @Test fun emptyModelAllowsOnlyOneExtraRecoveryProbe() {
         val paths=mutableListOf<String>()
         val repo=repository { request -> paths+=request.url.encodedPath; "" }
         assertThrows(IOException::class.java) { repo.stream("123") }
-        assertEquals(listOf("/novel/player/multi_video_model/preload/v1/"),paths)
+        assertEquals(5,paths.size)
+        assertEquals("/reading/bookapi/video_tab/multi_video_model/v1/",paths.first())
     }
     @Test fun encryptedVariantWithoutKeyFailsBeforePlayback() {
         val item=variant(720).put("encrypt_info",JSONObject().put("encrypt",true).put("encryption_method","cenc-aes-ctr"))

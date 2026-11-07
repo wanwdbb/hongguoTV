@@ -2,6 +2,22 @@ package com.hongguotv.core
 
 fun main(args: Array<String>) {
     val repository=ContentRepository()
+    if(args.contains("--season")) {
+        try {
+            if(!DeviceIdentity.registered) repository.registerDevice().let { DeviceIdentity.apply(it.installId,it.deviceId) }
+            val id=args.first { it.matches(Regex("[0-9]{1,30}")) }
+            val started=System.nanoTime()
+            val current=repository.detail(id)
+            println("current=${current.series.id} title=${current.series.title} type=${current.series.bookType} episodes=${current.episodes.size}")
+            val rows=repository.related(id)
+            println("related=${rows.size} elapsedMs=${(System.nanoTime()-started)/1_000_000}")
+            rows.forEach { println("id=${it.id} title=${it.title} preview=${it.preview} type=${it.bookType} parsed=${SeasonContinuation.parse(it.title)}") }
+            val next=SeasonContinuation.select(current.series,rows)
+            println("selected=$next")
+            if(next!=null) repository.detail(next.id).let { println("verified=${it.series.title} episodes=${it.episodes.size} selectedAgain=${SeasonContinuation.select(current.series,listOf(it.series))!=null}") }
+        } finally { repository.http.dispatcher.cancelAll();repository.http.connectionPool.evictAll();repository.http.dispatcher.executorService.shutdown() }
+        return
+    }
     if(args.contains("--ranking")) {
         try {
             for(board in RankBoard.entries) {

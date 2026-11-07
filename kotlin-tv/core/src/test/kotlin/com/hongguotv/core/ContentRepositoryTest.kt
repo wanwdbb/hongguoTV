@@ -46,7 +46,7 @@ class ContentRepositoryTest {
         OkHttpClient.Builder().addInterceptor { chain ->
             Response.Builder().request(chain.request()).protocol(Protocol.HTTP_1_1)
                 .code(200).message("OK").body(respond(chain.request()).toResponseBody()).build()
-        }.build(),clock
+        }.build(),clock,playbackFixture()
     )
 
     private fun rankPayload(page: Int = 1, totalPages: Int = 2) = JSONObject()

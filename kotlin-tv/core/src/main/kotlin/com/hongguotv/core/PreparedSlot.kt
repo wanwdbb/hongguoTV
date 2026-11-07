@@ -20,6 +20,7 @@ class PreparedSlot<T: Closeable>(private val clock: ()->Long,private val ttl: Lo
         clear()
         return result
     }
+    @Synchronized fun matches(next: String): Boolean = key==next && (value==null || clock()-readyAt in 0..ttl)
     @Synchronized fun isFresh(next: String): Boolean = value!=null && key==next && clock()-readyAt in 0..ttl
     @Synchronized fun clear() { revision++; value?.close(); value=null; key="" }
 }

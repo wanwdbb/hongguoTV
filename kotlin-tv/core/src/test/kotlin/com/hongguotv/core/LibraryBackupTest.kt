@@ -47,4 +47,18 @@ class LibraryBackupTest {
         assertTrue(runCatching { LibraryBackup.decode("[".repeat(10000)) }.isFailure)
         assertTrue(runCatching { LibraryBackup.decode(" ".repeat(LibraryBackup.MAX_BYTES+1)) }.isFailure)
     }
+    @Test fun `clock mode preserves backup and old backup compatibility`() {
+        for(mode in 0..2) {
+            val original=data().copy(settings=BackupSettings(clockMode=mode))
+            assertEquals(mode,LibraryBackup.decode(LibraryBackup.encode(original)).settings.clockMode)
+            assertEquals(mode,LibraryBackup.merge(data(),original,true).settings.clockMode)
+            assertEquals(1,LibraryBackup.merge(data(),original,false).settings.clockMode)
+        }
+        val old=JSONObject(LibraryBackup.encode(data()));old.getJSONObject("settings").remove("clockMode")
+        assertEquals(1,LibraryBackup.decode(old.toString()).settings.clockMode)
+        for(value in listOf<Any>(-1,3,1.5,"2",true)) {
+            old.getJSONObject("settings").put("clockMode",value)
+            assertTrue(runCatching {LibraryBackup.decode(old.toString())}.isFailure)
+        }
+    }
 }

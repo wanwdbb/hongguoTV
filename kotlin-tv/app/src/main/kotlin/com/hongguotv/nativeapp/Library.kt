@@ -157,6 +157,12 @@ class Library(context: Context) {
     var autoNext: Boolean
         get() = state().settings.autoNext
         set(value) { if (value != autoNext) { state().settings = state().settings.copy(autoNext = value); put("autoNext", value) } }
+    var autoSeason: Boolean
+        get() = state().settings.autoSeason
+        set(value) { if(value!=autoSeason) { state().settings=state().settings.copy(autoSeason=value); put("autoSeason",value) } }
+    var prefetchNext: Boolean
+        get() = state().settings.prefetchNext
+        set(value) { if(value!=prefetchNext) { state().settings=state().settings.copy(prefetchNext=value); put("prefetchNext",value) } }
     var contentType: ContentType
         get() = state().settings.type
         set(value) { if (value != contentType) { state().settings = state().settings.copy(type = value); put("contentType", value.storedValue) } }
@@ -166,13 +172,16 @@ class Library(context: Context) {
     var frameMode: VideoFrameMode
         get() = state().settings.frame
         set(value) { if (value != frameMode) { state().settings = state().settings.copy(frame = value); put("frameMode", value.name) } }
+    var clockMode: Int
+        get()=state().settings.clockMode
+        set(value) {val next=value.coerceIn(0,2);if(next!=clockMode) {state().settings=state().settings.copy(clockMode=next);put("clockMode",next)}}
     fun snapshot() = state().snapshot()
     fun restore(incoming: BackupData, restoreSettings: Boolean) {
         val merged = LibraryBackup.merge(snapshot(), incoming, restoreSettings)
         index = LibraryIndex(merged, state().updates())
         persist("favorites", "later", "progress", "watched", "hidden", "searches", "favoriteUpdates")
-        writes.submit(mapOf("quality" to { merged.settings.quality }, "playbackSpeed" to { merged.settings.speed },
-            "autoNext" to { merged.settings.autoNext }, "contentType" to { merged.settings.type.storedValue }, "frameMode" to { merged.settings.frame.name }))
+        writes.submit(mapOf("clockMode" to { merged.settings.clockMode }, "quality" to { merged.settings.quality }, "playbackSpeed" to { merged.settings.speed },
+            "autoNext" to { merged.settings.autoNext }, "autoSeason" to { merged.settings.autoSeason }, "prefetchNext" to { merged.settings.prefetchNext }, "contentType" to { merged.settings.type.storedValue }, "frameMode" to { merged.settings.frame.name }))
         flush()
     }
     /** Requests prompt background commit, without lifecycle-thread disk waits. */

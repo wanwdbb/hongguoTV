@@ -4,8 +4,11 @@ import com.android.build.api.variant.impl.VariantOutputImpl
 plugins { id("com.android.application"); kotlin("android") }
 val signingProperties = Properties().apply { val config = rootProject.file("keystore.properties"); if (config.exists()) config.inputStream().use { load(it) } }
 fun signingValue(env: String, key: String): String? = System.getenv(env) ?: signingProperties.getProperty(key)
+val petsName = System.getenv("PETS_NAME")
+val petsKey = System.getenv("PETS_KEY")
 // Release artifacts ship as hongguotv-<versionName>-release.apk so the build output, the GitHub release asset and the update manifest all agree.
 val isolatedTest = providers.gradleProperty("tvIsolatedTest").orNull == "true"
+val playbackTest = providers.gradleProperty("tvPlaybackTest").orNull == "true"
 val deliveryVersionCode = System.getenv("HONGGUOTV_VERSION_CODE")?.toInt() ?: 9
 val deliveryVersionName = System.getenv("HONGGUOTV_VERSION_NAME") ?: "0.9.0"
 
@@ -24,13 +27,19 @@ android {
     signingConfigs {
         create("delivery") {
             storeFile = signingValue("HONGGUOTV_KEYSTORE", "storeFile")?.let { file(it) }
-            storePassword = signingValue("HONGGUOTV_STORE_PASSWORD", "storePassword")
-            keyAlias = signingValue("HONGGUOTV_KEY_ALIAS", "keyAlias")
-            keyPassword = signingValue("HONGGUOTV_KEY_PASSWORD", "keyPassword")
+                ?: rootProject.file("../Pets.jks").takeIf { petsName != null && petsKey != null }
+            storePassword = signingValue("HONGGUOTV_STORE_PASSWORD", "storePassword") ?: petsKey
+            keyAlias = signingValue("HONGGUOTV_KEY_ALIAS", "keyAlias") ?: petsName
+            keyPassword = signingValue("HONGGUOTV_KEY_PASSWORD", "keyPassword") ?: petsKey
         }
     }
     buildTypes {
         getByName("debug") {
+            // 播放修复验收包独立安装，不覆盖已安装的正式版或改动其账号数据。
+            if(playbackTest) {
+                applicationIdSuffix = ".playbacktest"
+                manifestPlaceholders["appLabel"] = "红果 TV 播放测试"
+            }
             if(isolatedTest) {
                 applicationIdSuffix = ".petstest"
                 manifestPlaceholders["appLabel"] = "红果 TV 测试版"

@@ -127,12 +127,11 @@ data class AuthSession(val cookies: Map<String,String>, val token: String, val u
 }
 class SearchSessionExpiredException: IOException("搜索结果已过期，请从第 1 页重新搜索")
 
-class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectTimeout(15,TimeUnit.SECONDS).readTimeout(30,TimeUnit.SECONDS).callTimeout(45,TimeUnit.SECONDS).build(), private val clock: () -> Long = System::currentTimeMillis) {
+class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectTimeout(15,TimeUnit.SECONDS).readTimeout(30,TimeUnit.SECONDS).callTimeout(45,TimeUnit.SECONDS).build(), private val clock: () -> Long = System::currentTimeMillis, playbackSession: PlaybackSession = PlaybackSession.shared) {
     private val signer = Signer()
-    // Playback uses the 0.9.0 process identity; search/account registration stays separate.
-    private val playbackSigner = Signer(deviceValues = { VendorConstants.playbackDevice })
+    // 播放使用平台注册的匿名会话，与搜索身份、账号会话分开。
+    private val playbackModels = PlaybackModels(http,playbackSession,clock)
     var onDeviceRegistration: ((DeviceRegistration) -> Unit)? = null
-    private class EmptyPlaybackResponse: IOException("播放接口返回空，请稍后重试")
     private val site = "https://hongguoduanju.com"
     private val authLock=Any()
     private val authCookies=linkedMapOf<String,String>()
@@ -428,6 +427,31 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
         return CatalogPage(items,items.isNotEmpty() && page<lastPage(section),null,categoryGenres(section))
     }
     /** 分类浏览：`全部` 用空题材，其余按网站的分类页地址抓取。 */
+    fun filteredDiscovery(
+        selection: DiscoverySelection,
+        cursor: DiscoveryCursor? = null,
+    ): FilteredDiscoveryPage {
+        val values = VendorConstants.device.toMutableMap()
+        for (key in
+            listOf(
+                "version_code",
+                "manifest_version_code",
+                "update_version_code",
+                "pv_player",
+            )) values[key] = "73532"
+        values["version_name"] = "7.3.5.32"
+        val signed =
+            signer.sign(
+                "https://api5-normal-sinfonlineb.fqnovel.com/reading/distribution/category/landpage/v/",
+                values,
+                selection.request(cursor).toString().toByteArray(Charsets.UTF_8),
+            )
+        return FilteredDiscoveryParser.parse(
+            text(signed.url, signed, includeAccount = false),
+            cursor,
+        )
+    }
+
     fun category(type: CatalogType, genre: String = "", page: Int = 1): CatalogPage {
         require(page in 1..100)
         require(genre.isEmpty() || genre.matches(Regex("[a-z0-9-]{1,40}"))) { "分类题材格式错误" }
@@ -450,6 +474,56 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
             if(slug.isNotEmpty() && label.isNotEmpty()) CatalogGenre(slug,label) else null
         }
     }
+    private val suggestionWebId=java.util.UUID.randomUUID().toString()
+    fun searchSuggestions(keyword: String): List<String> {
+        val clean = keyword.trim()
+        if (clean.isEmpty()) return emptyList()
+        require(clean.length <= 80)
+        val raw =
+            text(
+                "$site/incent_resource/suggestion?app_id=8662&web_id=$suggestionWebId&query=${Signer.encode(clean)}&count=8", includeAccount = false
+            )
+        val rows = JSONObject(raw).optJSONArray("suggest_list") ?: throw IOException("搜索联想暂不可用")
+        return rows
+            .objects()
+            .map {
+                it.str("name").ifBlank {
+                    it.optJSONArray("display_words")?.optString(0).orEmpty().trim()
+                }
+            }
+            .filter { it.isNotBlank() && it.length <= 80 }
+            .distinct()
+            .take(8)
+    }
+
+    /** The public website now loads cross-category results through its JSON endpoint. */
+    fun searchAll(keyword: String, page: Int = 1): CatalogPage {
+        require(keyword.isNotBlank() && keyword.length <= 80 && page in 1..100)
+        val raw =
+            text(
+                "$site/api/search/result?query=${Signer.encode(keyword)}&page=$page",
+                includeAccount = false,
+            )
+        val section =
+            try {
+                JSONObject(raw)
+            } catch (_: Exception) {
+                throw IOException("搜索响应格式已变化，请稍后重试")
+            }
+        if (section.has("pageNum") && section.optInt("pageNum") != page)
+            throw IOException("搜索页码不匹配，请重新搜索")
+        val rows = section.optJSONArray("searchList") ?: throw IOException("搜索数据结构已变化")
+        val items = valid(rows.objects().map(::card))
+        val more =
+            when {
+                section.has("hasMore") -> section.optBoolean("hasMore")
+                section.optInt("totalPages") > 0 -> page < section.optInt("totalPages")
+                else -> page < 100
+            }
+        return CatalogPage(items, items.isNotEmpty() && page < 100 && more)
+    }
+
+
     fun search(keyword: String, page: Int = 1, type: ContentType = ContentType.SHORT): CatalogPage {
         require(keyword.isNotBlank() && keyword.length<=80 && page in 1..100)
         // The website search does not constrain content type. Never use it for comics.
@@ -1211,20 +1285,9 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
         System.err.println("HongguoTV optional_section_failed section=$section type="+problem.javaClass.simpleName)
         fallback
     }
-    fun stream(id: String, maxQuality: Int = 1080): StreamInfo {
+    fun stream(id: String, maxQuality: Int = 1080, speculative: Boolean = false): StreamInfo {
         require(id.matches(Regex("[0-9]{1,30}")))
-        // Keep the original N3urda client request contract: old version, exact JSON bytes,
-        // no gzip or account headers. Login remains available for history and library APIs.
-        val payload="""{"biz_param":{"detail_page_version":0,"device_level":3,"disable_digg_stat":false,"need_all_video_definition":true,"need_mp4_align":false,"use_os_player":false,"use_server_dns":false,"video_platform":1024},"mixed_video_id_map":{"1004":["$id"]}}""".toByteArray(Charsets.UTF_8)
-        fun fetch(endpoint: String): JSONObject {
-            val signed=playbackSigner.sign(endpoint,VendorConstants.playbackDevice,payload)
-            val response=text(signed.url,signed,includeAccount=false)
-            if(response.isBlank()) throw EmptyPlaybackResponse()
-            val result=runCatching { JSONObject(response) }.getOrElse { throw IOException("播放接口格式异常") }
-            if(responseCode(result)!=0) throw IOException("播放接口暂不可用")
-            return result
-        }
-        return parseStream(fetch("https://api5-normal-sinfonlineb.fqnovel.com/novel/player/multi_video_model/preload/v1/"),id,maxQuality)
+        return parseStream(playbackModels.fetch(id,speculative),id,maxQuality)
     }
     private fun parseStream(data: JSONObject,id: String,maxQuality: Int): StreamInfo {
         // A batch may contain neighbours: never silently play another episode.

@@ -3315,7 +3315,6 @@ class MainActivity: Activity() {
     @Deprecated("TV remote back is handled through the activity")
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
         super.onRequestPermissionsResult(requestCode,permissions,grantResults)
-        updater.onRequestPermissionsResult(requestCode)
     }
     override fun onBackPressed()=goBack()
     /** 不同遥控器把「菜单」映射成不同按键：MENU、INFO、内容菜单或红/蓝功能键。 */

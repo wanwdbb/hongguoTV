@@ -187,6 +187,9 @@ class MainActivity: Activity() {
     private var qrPollRevision=-1
     private var qrPollRunnable: Runnable?=null
     private var qrImageView: ImageView?=null
+    private var qrZoomDialog: AlertDialog?=null
+    private var qrZoomImage: ImageView?=null
+    private var qrZoomStatus: TextView?=null
     private var qrStatusView: TextView?=null
     private var qrErrorView: TextView?=null
     private var qrRefreshButton: TextView?=null
@@ -340,6 +343,7 @@ class MainActivity: Activity() {
     private val tick=object: Runnable {
         override fun run() {
             if(!foreground || isDestroyed) return
+            qrZoomStatus?.text=qrStatusView?.text
             if(screen==Screen.PLAYER) {
                 if(sleepTimer.poll()) stopForSleep()
                 val buffering=player?.playbackState==Player.STATE_BUFFERING && requestedAutoplay && !pausedForLifecycle && episodePanel==null && !playError && !sleepStopped
@@ -434,6 +438,7 @@ class MainActivity: Activity() {
         qrPollRunnable=null
     }
     private fun stopQrLogin() {
+        qrZoomDialog?.dismiss();qrZoomDialog=null;qrZoomImage=null;qrZoomStatus=null
         qrRevision++
         stopQrPoll()
         qrCreating=false
@@ -1623,6 +1628,12 @@ class MainActivity: Activity() {
         info.addView(status)
         val error=text("",13f,accent).apply { visibility=View.GONE; setPadding(0,dp(8),0,0) }
         info.addView(error)
+        val zoom=button("放大二维码") { showLoginQrZoom() }
+        info.addView(zoom,lp(dp(180),dp(46)).apply {topMargin=dp(14)})
+        qrFrame.isFocusable=true;qrFrame.isFocusableInTouchMode=true;qrFrame.id=View.generateViewId()
+        qrFrame.contentDescription="登录二维码，按确定放大"
+        qrFrame.setOnClickListener {showLoginQrZoom()}
+        qrFrame.setOnFocusChangeListener {_,focused -> qrFrame.background=rounded(Color.WHITE,if(focused) accent else Color.TRANSPARENT)}
         val refresh=button("刷新二维码") { startQrLogin() }
         refresh.minHeight=dp(46); refresh.setPadding(dp(14),0,dp(14),0)
         info.addView(refresh,lp(dp(180),dp(46)).apply { topMargin=dp(14) })
@@ -1632,9 +1643,11 @@ class MainActivity: Activity() {
         parent.addView(card,lp(-1,-2))
         qrImageView=qr; qrStatusView=status; qrErrorView=error; qrRefreshButton=refresh
         val up=sectionButtons[tab]?.id ?: nav[tab].id
-        refresh.nextFocusUpId=up; refresh.nextFocusDownId=refresh.id
-        refresh.nextFocusLeftId=refresh.id; refresh.nextFocusRightId=refresh.id
-        nav.forEach { it.nextFocusDownId=refresh.id }
+        zoom.nextFocusUpId=up;zoom.nextFocusDownId=refresh.id;zoom.nextFocusLeftId=qrFrame.id;zoom.nextFocusRightId=zoom.id
+        refresh.nextFocusUpId=zoom.id; refresh.nextFocusDownId=refresh.id
+        refresh.nextFocusLeftId=qrFrame.id; refresh.nextFocusRightId=refresh.id
+        qrFrame.nextFocusUpId=up;qrFrame.nextFocusRightId=zoom.id;qrFrame.nextFocusDownId=refresh.id
+        nav.forEach { it.nextFocusDownId=zoom.id }
         startQrLogin()
         return refresh
     }
@@ -1644,7 +1657,8 @@ class MainActivity: Activity() {
         stopQrPoll()
         qrCreating=true
         qrPollInFlight=false; qrPollRevision=-1
-        qrImageView?.setImageDrawable(null)
+        qrImageView?.setImageDrawable(null);qrZoomImage?.setImageDrawable(null)
+        qrZoomStatus?.text="正在获取二维码…"
         qrStatusView?.text="正在获取二维码…"
         qrErrorView?.apply { text=""; visibility=View.GONE }
         io.execute {
@@ -1715,6 +1729,7 @@ class MainActivity: Activity() {
                                 qrRevision++
                                 stopQrPoll()
                                 repository.cancelLoginQr()
+                                qrZoomDialog?.dismiss()
                                 Toast.makeText(this,"登录成功",Toast.LENGTH_SHORT).show()
                                 if(screen==Screen.CATALOG) {
                                     if(accountTab()) { catalog=emptyList(); hasMore=false; showCatalog(load=true) }
@@ -1731,12 +1746,37 @@ class MainActivity: Activity() {
             }
         }
     }
+    private fun showLoginQrZoom() {
+        if(screen!=Screen.CATALOG || tab!=TAB_ACCOUNT) return
+        qrZoomDialog?.dismiss()
+        val size=minOf(resources.displayMetrics.heightPixels-dp(190),resources.displayMetrics.widthPixels-dp(100)).coerceAtLeast(dp(120))
+        val body=column().apply {gravity=Gravity.CENTER_HORIZONTAL;setPadding(dp(16),dp(8),dp(16),dp(8))}
+        val image=ImageView(this).apply {
+            scaleType=ImageView.ScaleType.FIT_CENTER;setBackgroundColor(Color.WHITE);setPadding(dp(20),dp(20),dp(20),dp(20))
+            setImageDrawable(qrImageView?.drawable);contentDescription="放大的红果登录二维码"
+        }
+        body.addView(image,lp(size,size))
+        val status=text(qrStatusView?.text?.toString().orEmpty(),15f).apply {setPadding(0,dp(10),0,0)}
+        body.addView(status)
+        val popup=AlertDialog.Builder(this).setTitle("扫码登录 · 放大二维码").setView(body)
+            .setPositiveButton("关闭",null).setNeutralButton("刷新二维码",null).create()
+        qrZoomDialog=popup;qrZoomImage=image;qrZoomStatus=status
+        popup.setOnDismissListener {
+            if(qrZoomDialog===popup) {qrZoomDialog=null;qrZoomImage=null;qrZoomStatus=null}
+        }
+        popup.show()
+        popup.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener {startQrLogin()}
+        popup.getButton(AlertDialog.BUTTON_POSITIVE).requestFocus()
+    }
     private fun showQrImage(dataUri: String): Boolean {
         val payload=dataUri.substringAfter(',',dataUri)
         if(payload.length>2_000_000) return false
         val bytes=runCatching { Base64.decode(payload,Base64.DEFAULT) }.getOrNull() ?: return false
         val bitmap=runCatching { BitmapFactory.decodeByteArray(bytes,0,bytes.size) }.getOrNull() ?: return false
         qrImageView?.setImageBitmap(bitmap)
+        (qrImageView?.drawable as? android.graphics.drawable.BitmapDrawable)?.isFilterBitmap=false
+        qrZoomImage?.setImageBitmap(bitmap)
+        (qrZoomImage?.drawable as? android.graphics.drawable.BitmapDrawable)?.isFilterBitmap=false
         return true
     }
     private var settingsGroup=0
@@ -3423,3 +3463,4 @@ class MainActivity: Activity() {
         super.onDestroy()
     }
 }
+

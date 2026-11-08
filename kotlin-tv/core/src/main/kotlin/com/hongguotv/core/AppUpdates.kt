@@ -19,6 +19,19 @@ data class AppUpdate(val versionCode: Long, val versionName: String, val minSdk:
     companion object {
         const val REPOSITORY = "wanwdbb/hongguoTV"
         const val RELEASES = "https://github.com/$REPOSITORY/releases"
+        const val LATEST_API = "https://api.github.com/repos/$REPOSITORY/releases/latest"
+        fun latestTag(json: String): String {
+            val release = JSONObject(json)
+            require(!release.optBoolean("prerelease", false) && !release.optBoolean("draft", false)) { "不能使用预发布或草稿版本" }
+            val tag = release.getString("tag_name")
+            require(tag.matches(Regex("kotlin-v[0-9][0-9A-Za-z.+-]{0,80}")))
+            val assets = release.getJSONArray("assets")
+            require((0 until assets.length()).any { assets.getJSONObject(it).optString("name") == "update.json" }) { "发行版缺少更新清单" }
+            return tag
+        }
+        fun releaseManifest(json: String, tag: String): AppUpdate = parse(json).also {
+            require(it.tag == tag) { "清单标签不匹配" }
+        }
         const val MAX_APK_BYTES = 80L * 1024 * 1024
         fun parse(json: String): AppUpdate {
             val o = JSONObject(json)
@@ -90,20 +103,27 @@ class AppUpdateRepository(private val accelerators: List<String> = DEFAULT_ACCEL
         .header("Cache-Control", "no-cache").build()
     private fun cancelled() = Thread.currentThread().isInterrupted
     fun latest(): AppUpdate {
+        val release = metadata(AppUpdate.LATEST_API)
+        val tag = try { AppUpdate.latestTag(release) }
+            catch (_: Exception) { throw IOException("最新发行版信息格式不正确") }
+        val manifest = metadata("${AppUpdate.RELEASES}/download/$tag/update.json")
+        return try { AppUpdate.releaseManifest(manifest, tag) }
+            catch (_: Exception) { throw IOException("更新信息格式不正确") }
+    }
+    private fun metadata(source: String): String {
         var failure: IOException? = null
-        for ((_, url) in routed("${AppUpdate.RELEASES}/latest/download/update.json", route(), accelerators).withIndex()) {
+        for (url in routed(source, route(), accelerators)) {
             if (cancelled()) throw IOException("更新检查已取消")
-            try {
-                return manifest(url)
-            } catch (e: MissingRelease) {
-                // Only GitHub itself may declare that no release exists; a mirror missing the file is just a failed attempt.
-                if (url == "${AppUpdate.RELEASES}/latest/download/update.json") throw e
+            try { return readMetadata(url) }
+            catch (e: MissingRelease) {
+                // Only the origin may declare that no release exists.
+                if (url == source) throw e
                 failure = e
             } catch (e: IOException) { failure = e }
         }
         throw failure ?: IOException("无法检查更新，请稍后重试")
     }
-    private fun manifest(url: String): AppUpdate {
+    private fun readMetadata(url: String): String {
         val call = http.newCall(request(url))
         call.timeout().timeout(20, TimeUnit.SECONDS)
         return call.execute().use { response ->
@@ -114,7 +134,7 @@ class AppUpdateRepository(private val accelerators: List<String> = DEFAULT_ACCEL
                 while (true) { val n = input.read(buffer); if (n < 0) break; if (out.size() + n > 65536) throw IOException("更新信息过大"); out.write(buffer, 0, n) }
                 out.toByteArray()
             } ?: throw IOException("更新信息为空")
-            try { AppUpdate.parse(bytes.toString(Charsets.UTF_8)) } catch (_: Exception) { throw IOException("更新信息格式不正确") }
+            bytes.toString(Charsets.UTF_8)
         }
     }
     fun download(update: AppUpdate, file: File, progress: (Int) -> Unit) {
@@ -151,7 +171,7 @@ class AppUpdateRepository(private val accelerators: List<String> = DEFAULT_ACCEL
          * the SHA-256 check in [UpdateFiles] accepts, and the installer still verifies the release signature.
          */
         val DEFAULT_ACCELERATORS = listOf("https://gh-proxy.com/", "https://ghfast.top/", "https://ghproxy.vip/")
-        private val GITHUB_HOSTS = setOf("github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com")
+        private val GITHUB_HOSTS = setOf("github.com", "api.github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com")
         private fun hostOf(prefix: String) = runCatching { URI(prefix) }.getOrNull()
             ?.takeIf { it.scheme == "https" && !it.host.isNullOrBlank() }?.host
         /** Direct URLs first, then one URL per usable accelerator prefix; cleartext or malformed entries are dropped. */

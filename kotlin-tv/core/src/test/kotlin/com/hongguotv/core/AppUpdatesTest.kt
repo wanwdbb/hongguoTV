@@ -21,6 +21,28 @@ class AppUpdatesTest {
         val dir = Files.createTempDirectory("update-test").toFile()
         try { block(File(dir, "update.apk")) } finally { dir.deleteRecursively() }
     }
+    private fun release() = JSONObject().put("tag_name", "kotlin-v0.9.2")
+        .put("prerelease", false).put("draft", false)
+        .put("assets", org.json.JSONArray().put(JSONObject().put("name", "update.json")))
+    @Test fun formalReleaseMustContainAnUpdateManifest() {
+        assertEquals("kotlin-v0.9.2", AppUpdate.latestTag(release().toString()))
+        assertThrows(IllegalArgumentException::class.java) {
+            AppUpdate.latestTag(release().put("assets", org.json.JSONArray()).toString())
+        }
+    }
+    @Test fun prereleasesAndDraftsAreNotUpdates() {
+        for (flag in listOf("prerelease", "draft")) assertThrows(IllegalArgumentException::class.java) {
+            AppUpdate.latestTag(release().put(flag, true).toString())
+        }
+    }
+    @Test fun releaseTagCannotRedirectMetadataOutsideRelease() {
+        for (tag in listOf("../../other", "https://example.com", "other-v1"))
+            assertThrows(IllegalArgumentException::class.java) { AppUpdate.latestTag(release().put("tag_name", tag).toString()) }
+    }
+    @Test fun metadataMustBelongToSelectedRelease() {
+        assertEquals("kotlin-v0.9.2", AppUpdate.releaseManifest(json().toString(), "kotlin-v0.9.2").tag)
+        assertThrows(IllegalArgumentException::class.java) { AppUpdate.releaseManifest(json().toString(), "kotlin-v0.9.3") }
+    }
     @Test fun onlyHigherCompatibleVersionsAreUpdates() {
         val update = update()
         assertTrue(update.newerThan(9, 26)); assertFalse(update.newerThan(10001, 36)); assertFalse(update.newerThan(10002, 36)); assertFalse(update.newerThan(9, 25))
@@ -87,7 +109,7 @@ class AppUpdatesTest {
     }
     @Test fun onlyGithubAndConfiguredMirrorHostsAreReachable() {
         val hosts = AppUpdateRepository.permittedHosts(listOf("https://gh-proxy.com/", "http://cleartext.example/", "not a url"))
-        assertEquals(setOf("github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com", "gh-proxy.com"), hosts)
+        assertEquals(setOf("github.com", "api.github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com", "gh-proxy.com"), hosts)
     }
     @Test fun defaultAcceleratorsArePlainHttpsPrefixes() {
         assertTrue(AppUpdateRepository.DEFAULT_ACCELERATORS.isNotEmpty())

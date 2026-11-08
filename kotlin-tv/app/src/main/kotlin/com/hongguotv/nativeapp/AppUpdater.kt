@@ -63,6 +63,7 @@ class AppUpdater(private val activity: Activity, private val idle: () -> Boolean
     private var status = "当前版本 ${BuildConfig.VERSION_NAME}"
     private var retryAfter = 0L
     private var promptedCode = 0L
+    private var startupCheckPending = true
     private val auto
         get() = preferences.getBoolean("automatic", true)
 
@@ -70,7 +71,11 @@ class AppUpdater(private val activity: Activity, private val idle: () -> Boolean
         object : Runnable {
             override fun run() {
                 if (!active) return
-                if (idle() && dialog == null && !busy && auto) {
+                // Once per launch, fetch metadata even if the recommendation player is open.
+                // Downloads and installation prompts still require the reference idle state.
+                if (startupCheckPending && dialog == null && !busy && auto) {
+                    check(false, startup = true)
+                } else if (idle() && dialog == null && !busy && auto) {
                     val now = System.currentTimeMillis()
                     val last = preferences.getLong("last_attempt", 0)
                     val update = available
@@ -259,10 +264,12 @@ class AppUpdater(private val activity: Activity, private val idle: () -> Boolean
             }
     }
 
-    private fun check(manual: Boolean) {
-        if (busy || !active || !idle()) return
+    private fun check(manual: Boolean, startup: Boolean = false) {
+        if (busy || !active || (!idle() && !startup)) return
+        startupCheckPending = false
         preferences.edit().putLong("last_attempt", System.currentTimeMillis()).apply()
         updateStatus("正在检查新版…")
+        android.util.Log.i("HongguoTV", "Update check started manual=$manual startup=$startup")
         work({ repository.latest() }) { update ->
             available =
                 update.takeIf {
@@ -292,6 +299,7 @@ class AppUpdater(private val activity: Activity, private val idle: () -> Boolean
         val update = available ?: return
         if (busy || !active || !idle()) return
         updateStatus("正在下载 ${update.versionName}…")
+        android.util.Log.i("HongguoTV", "Update download started version=${update.versionCode}")
         val ticket = generation + 1
         work({
             repository.download(update, apk) { percent ->
@@ -303,6 +311,7 @@ class AppUpdater(private val activity: Activity, private val idle: () -> Boolean
             validateApk(update)
         }) {
             ready = true
+            android.util.Log.i("HongguoTV", "Update download verified version=${update.versionCode}")
             updateStatus("${update.versionName} 已下载并校验\n${update.notes}\n\n确认后由系统覆盖安装，保留本机记录。")
             if (idle() && dialog == null && (manual || !deferred(update))) {
                 promptedCode = update.versionCode

@@ -53,6 +53,29 @@ class DanmakuView(context: Context) : View(context) {
     private var items=emptyList<DanmakuComment>()
     private var flights=emptyList<Flight>()
     private var lastPlanAt=0L
+    private val pendingSprites=java.util.ArrayDeque<Flight>()
+    private val prepareSprites=object: Runnable {
+        override fun run() {
+            // Spread cold text/emoji rasterization across frames, never batch it in onDraw.
+            val next=pendingSprites.pollFirst() ?: return
+            if(!sprites.containsKey(next.text)) sprite(next.text,next.parts)
+            invalidate()
+            if(pendingSprites.isNotEmpty()) postOnAnimation(this)
+        }
+    }
+    private val refreshPlan=object: Runnable {
+        override fun run() {
+            if(!isAttachedToWindow) return
+            val now=positionProvider()
+            if(now<lastPlanAt || now-lastPlanAt>=2_000L) {plan();invalidate()}
+            postDelayed(this,250)
+        }
+    }
+    override fun onAttachedToWindow() {super.onAttachedToWindow();post(refreshPlan)}
+    override fun onDetachedFromWindow() {
+        removeCallbacks(refreshPlan);removeCallbacks(prepareSprites);pendingSprites.clear()
+        super.onDetachedFromWindow()
+    }
     /** 一条弹幕从右边缘走到完全离开的时长；电视上比手机慢一点更好读。 */
     var lifetime=12_000L
     var positionProvider: () -> Long = { 0L }
@@ -79,7 +102,7 @@ class DanmakuView(context: Context) : View(context) {
     /** 换集时释放上一集的文字位图；拖动进度时不要调用，避免同一句反复重建。 */
     fun clearSprites() { sprites.clear() }
     fun submit(list: List<DanmakuComment>) { items=list; plan(); invalidate() }
-    fun clear() { items=emptyList(); flights=emptyList(); invalidate() }
+    fun clear() { items=emptyList(); flights=emptyList();pendingSprites.clear();removeCallbacks(prepareSprites); invalidate() }
     override fun onSizeChanged(w: Int,h: Int,oldw: Int,oldh: Int) { super.onSizeChanged(w,h,oldw,oldh); plan() }
     private fun lanes()=minOf(maxLines,((height*0.44f)/laneHeight).toInt().coerceIn(1,9))
     private fun shown(text: String)=if(text.length>52) text.take(51)+"…" else text
@@ -144,7 +167,7 @@ class DanmakuView(context: Context) : View(context) {
         // 只排当前时间前后的一小段：整集几百条全部预渲染会卡主线程，也会挤爆文字位图缓存。
         // 播放过程中每 2 秒补排一次，后面的弹幕进入 20 秒窗口时再生成。
         val lanes=arrayOfNulls<Flight>(lanes())
-        val planned=ArrayList<Flight>(items.size)
+        val planned=ArrayList<Flight>()
         for(item in items) {
             // 已经在画面上消失的弹幕不再绘制，但仍参与 2 个滚动周期内的轨道占用计算，
             // 否则每条弹幕过期时，后面还在画面上的弹幕会突然换行。
@@ -152,7 +175,10 @@ class DanmakuView(context: Context) : View(context) {
             if(item.timeMs<now-2*lifetime || item.timeMs>now+20_000L) continue
             val text=shown(item.text)
             val parts=danmakuParts(text)
-            val size=sprite(text,parts).width.toFloat()+gapMinimum/2
+            // Estimate with text metrics only: do not allocate bitmaps or decode PNGs here.
+            val size=(sprites[text]?.width?.toFloat() ?: (parts.sumOf {
+                if(it.emojiAsset!=null) (textSize*1.25f).toDouble() else white.measureText(it.fallback).toDouble()
+            }.toFloat()+ceil(shadowOffset)+1))+gapMinimum/2
             var lane=-1
             for(index in lanes.indices) {
                 val previous=lanes[index]
@@ -169,11 +195,14 @@ class DanmakuView(context: Context) : View(context) {
             lanes[lane]=flight; if(!expired) planned+=flight
         }
         flights=planned
+        removeCallbacks(prepareSprites);pendingSprites.clear()
+        planned.filter { !sprites.containsKey(it.text) }.distinctBy {it.text}.forEach {pendingSprites.addLast(it)}
+        if(pendingSprites.isNotEmpty()) postOnAnimation(prepareSprites)
     }
     override fun onDraw(canvas: Canvas) {
         val now=positionProvider()
         // 播放推进时补排新进入窗口的弹幕；暂停时位置不变，不重复计算。
-        if(now<lastPlanAt || now-lastPlanAt>=2_000L) plan()
+
         if(flights.isEmpty()) return
         val width=width.toFloat()
         var active=false
@@ -182,7 +211,7 @@ class DanmakuView(context: Context) : View(context) {
             if(elapsed<0L) { if(elapsed>-1_000L) active=true; continue }
             if(elapsed>lifetime) continue
             active=true
-            val bitmap=sprite(flight.text,flight.parts)
+            val bitmap=sprites[flight.text] ?: continue
             val x=width-(width+flight.width)*elapsed/lifetime
             val top=topPadding+flight.lane*laneHeight
             canvas.drawBitmap(bitmap,x.toInt().toFloat(),(top+textSize-bitmap.height).toInt().toFloat(),null)

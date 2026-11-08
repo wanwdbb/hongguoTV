@@ -76,7 +76,7 @@ object UpdateFiles {
 }
 
 /** Direct GitHub is always attempted first; only a timeout or network failure falls back to a mirror prefix. */
-class AppUpdateRepository(private val accelerators: List<String> = DEFAULT_ACCELERATORS) : java.io.Closeable {
+class AppUpdateRepository(private val accelerators: List<String> = DEFAULT_ACCELERATORS, private val route: () -> String = { "auto" }) : java.io.Closeable {
     private val permitted: Set<String> = permittedHosts(accelerators)
     private val http = OkHttpClient.Builder().connectTimeout(10, TimeUnit.SECONDS).readTimeout(20, TimeUnit.SECONDS)
         .callTimeout(5, TimeUnit.MINUTES).addNetworkInterceptor { chain ->
@@ -91,13 +91,13 @@ class AppUpdateRepository(private val accelerators: List<String> = DEFAULT_ACCEL
     private fun cancelled() = Thread.currentThread().isInterrupted
     fun latest(): AppUpdate {
         var failure: IOException? = null
-        for ((attempt, url) in accelerated("${AppUpdate.RELEASES}/latest/download/update.json", accelerators).withIndex()) {
+        for ((_, url) in routed("${AppUpdate.RELEASES}/latest/download/update.json", route(), accelerators).withIndex()) {
             if (cancelled()) throw IOException("更新检查已取消")
             try {
                 return manifest(url)
             } catch (e: MissingRelease) {
                 // Only GitHub itself may declare that no release exists; a mirror missing the file is just a failed attempt.
-                if (attempt == 0) throw e
+                if (url == "${AppUpdate.RELEASES}/latest/download/update.json") throw e
                 failure = e
             } catch (e: IOException) { failure = e }
         }
@@ -120,7 +120,7 @@ class AppUpdateRepository(private val accelerators: List<String> = DEFAULT_ACCEL
     fun download(update: AppUpdate, file: File, progress: (Int) -> Unit) {
         if (UpdateFiles.verify(file, update)) return
         var failure: IOException? = null
-        for (url in accelerated(update.downloadUrl, accelerators)) {
+        for (url in routed(update.downloadUrl, route(), accelerators)) {
             if (cancelled()) throw IOException("下载已取消")
             try { return fetch(url, update, file, progress) }
             catch (e: IOException) {
@@ -157,6 +157,12 @@ class AppUpdateRepository(private val accelerators: List<String> = DEFAULT_ACCEL
         /** Direct URLs first, then one URL per usable accelerator prefix; cleartext or malformed entries are dropped. */
         fun accelerated(url: String, accelerators: List<String> = DEFAULT_ACCELERATORS): List<String> =
             listOf(url) + accelerators.mapNotNull { prefix -> hostOf(prefix)?.let { prefix.trimEnd('/') + "/" + url } }
+        /** An explicit mirror never waits for direct GitHub or silently changes routes. */
+        fun routed(url: String, route: String, accelerators: List<String> = DEFAULT_ACCELERATORS): List<String> = when(route) {
+            "direct" -> listOf(url)
+            in accelerators -> listOf(route.trimEnd('/') + "/" + url)
+            else -> accelerated(url, accelerators)
+        }
         fun permittedHosts(accelerators: List<String> = DEFAULT_ACCELERATORS): Set<String> =
             GITHUB_HOSTS + accelerators.mapNotNull(::hostOf)
     }

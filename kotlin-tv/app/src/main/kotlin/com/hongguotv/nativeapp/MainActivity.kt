@@ -1845,6 +1845,14 @@ class MainActivity: Activity() {
                 4 -> {
         lateinit var updates: TextView
         updates=setting(device,"版本与更新  ·  ${BuildConfig.VERSION_NAME}") { updater.show(updates) }
+                    lateinit var githubRoute: TextView
+                    githubRoute=setting(device,"GitHub 下载线路  ·  ${updater.routeLabel}") {
+                        tvTools.choose("GitHub 下载线路",updater.routeLabels,githubRoute,{choice ->
+                            updater.selectRoute(choice);githubRoute.text="GitHub 下载线路  ·  ${updater.routeLabel}"
+                        })
+                    }
+                    content.addView(text("指定代理后直接使用所选线路，检查与下载共用；线路速度取决于网络。",12f,muted).apply {setPadding(0,dp(8),0,dp(12))})
+
         val license=setting(device,"开源许可") {
             AlertDialog.Builder(this).setTitle("开源许可").setMessage("本原生版以 GPL-3.0 发布。\n内容协议与加密处理移植自 drpys（22261ad）。\nAndroidX Media3 / OkHttp：Apache-2.0\nKotlin：Apache-2.0\nBouncy Castle：MIT\n完整源码和许可证见 GitHub：wanwdbb/hongguoTV。").setPositiveButton("关闭",null).show()
         }

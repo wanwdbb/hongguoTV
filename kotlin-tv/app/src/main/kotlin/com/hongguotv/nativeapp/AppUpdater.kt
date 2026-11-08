@@ -30,8 +30,22 @@ import java.util.concurrent.Future
 class AppUpdater(private val activity: Activity, private val idle: () -> Boolean) {
     private val main = Handler(Looper.getMainLooper())
     private val worker = Executors.newSingleThreadExecutor()
-    private val repository = AppUpdateRepository()
     private val preferences = activity.getSharedPreferences("app_updates", Activity.MODE_PRIVATE)
+    @Volatile private var selectedRoute=preferences.getString("github_route","auto").orEmpty().let {
+        if(it=="direct" || it in AppUpdateRepository.DEFAULT_ACCELERATORS) it else "auto"
+    }
+    private val repository = AppUpdateRepository(route={selectedRoute})
+    val routeLabels get()=listOf("自动 · 直连失败后切换代理","直连 GitHub") + AppUpdateRepository.DEFAULT_ACCELERATORS.map { "代理 · ${Uri.parse(it).host}" }
+    private val routeValues get()=listOf("auto","direct") + AppUpdateRepository.DEFAULT_ACCELERATORS
+    val routeLabel get()=routeLabels[routeValues.indexOf(selectedRoute).coerceAtLeast(0)]
+    fun selectRoute(index: Int) {
+        val next=routeValues.getOrNull(index) ?: return
+        if(next==selectedRoute) return
+        interrupt();selectedRoute=next;preferences.edit().putString("github_route",next).apply()
+        retryAfter=0;updateStatus("下载线路已切换：$routeLabel，请重新检查或下载")
+        renderActions()
+    }
+
     private val apk = File(activity.cacheDir, "updates/update.apk")
     private var task: Future<*>? = null
     private var generation = 0

@@ -96,4 +96,12 @@ class AppUpdatesTest {
             assertEquals("https", uri.scheme); assertEquals("https://${uri.host}/", prefix)
         }
     }
+    @Test fun selectedRouteSkipsUnwantedEndpoints() {
+        val url=update().downloadUrl
+        assertEquals(listOf(url),AppUpdateRepository.routed(url,"direct"))
+        for(proxy in AppUpdateRepository.DEFAULT_ACCELERATORS)
+            assertEquals(listOf(proxy+url),AppUpdateRepository.routed(url,proxy))
+        assertEquals(AppUpdateRepository.accelerated(url),AppUpdateRepository.routed(url,"auto"))
+        assertEquals(AppUpdateRepository.accelerated(url),AppUpdateRepository.routed(url,"https://untrusted.invalid/"))
+    }
 }

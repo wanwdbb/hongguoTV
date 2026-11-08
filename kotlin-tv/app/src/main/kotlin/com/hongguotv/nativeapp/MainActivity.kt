@@ -1232,12 +1232,18 @@ class MainActivity: Activity() {
                 tab==TAB_HISTORY && accountRemote() && history!=null -> openDetail(item,true,true,false,history.episodeId,history.position,history.episodeIndex)
                 else -> openDetail(item,tab==TAB_HISTORY || collection=="resume" || collection=="updates")
             }
-        },{ item -> catalogFocus=item.id; preview.show(item,selectionStatus(item)) },::quickActions,label={ item ->
+        },{ item ->
+            catalogFocus=item.id
+            val position=if(tab==TAB_RANK) ranking?.positions?.get(item.id) else null
+            val status=listOfNotNull(position?.rank?.let { "第 $it 名" },position?.status,position?.heat,selectionStatus(item))
+                .filter { it.isNotBlank() }.joinToString(" · ")
+            preview.show(item,status)
+        },::quickActions,rank={ item -> if(tab==TAB_RANK) ranking?.positions?.get(item.id)?.rank else null },label={ item ->
             when {
                 tab==TAB_HISTORY && accountRemote() -> remoteHistory[item.id]?.let(::remoteHistoryLabel) ?: item.badge
                 tab==TAB_HISTORY -> selectionStatus(item).ifBlank { item.badge }
                 tab==TAB_FAVORITES && !accountRemote() -> library.favoriteLabel(item.id)
-                tab==TAB_RANK -> ranking?.positions?.get(item.id)?.let { listOfNotNull(it.rank?.let { rank -> "第 $rank 名" },it.heat).filter { value -> value.isNotBlank() }.joinToString(" · ") } ?: item.badge
+                tab==TAB_RANK -> ranking?.positions?.get(item.id)?.let { listOf(it.status,it.heat).filter { value -> value.isNotBlank() }.joinToString(" · ") } ?: item.badge
                 else -> item.badge
             }
         })
@@ -1260,6 +1266,9 @@ class MainActivity: Activity() {
                     else -> repository.search(query,number,type)
                 } },{ result ->
                     page=number; catalog=(catalog+result.items).distinctBy { it.id }; hasMore=result.hasMore && number<100
+                    if(requestedTab==TAB_RANK) result.ranking?.let { next ->
+                        ranking=next.copy(positions=ranking?.positions.orEmpty()+next.positions)
+                    }
                     grid.append(visible(result.items)); grid.state(hasMore)
                 },{ grid.state(true,error=true) })
             } else grid.state(false)

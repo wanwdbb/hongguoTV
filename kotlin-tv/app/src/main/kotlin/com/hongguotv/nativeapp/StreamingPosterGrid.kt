@@ -19,6 +19,7 @@ internal class StreamingPosterGrid(
     private val actions: (Series,View)->Unit = { _,_ -> },
     private val left: (() -> View?)? = null,
     private val embedded: Boolean=false,
+    private val rank: (Series)->Int? = { null },
     private val label: (Series)->String = { it.badge }
 ): ScrollView(context) {
     private fun dp(n: Int)=(n*resources.displayMetrics.density).toInt()
@@ -139,7 +140,7 @@ internal class StreamingPosterGrid(
         orientation=LinearLayout.HORIZONTAL; gravity=Gravity.TOP
         repeat(columns) {
             val card=LinearLayout(context).apply { orientation=LinearLayout.VERTICAL;id=View.generateViewId();isFocusable=true;isFocusableInTouchMode=true;setPadding(dp(4),dp(4),dp(4),dp(8)) }
-            card.addView(ImageView(context).apply { scaleType=ImageView.ScaleType.FIT_CENTER;importantForAccessibility=View.IMPORTANT_FOR_ACCESSIBILITY_NO },LinearLayout.LayoutParams(-1,1))
+            card.addView(RankedPoster(context).apply { scaleType=ImageView.ScaleType.FIT_CENTER;importantForAccessibility=View.IMPORTANT_FOR_ACCESSIBILITY_NO },LinearLayout.LayoutParams(-1,1))
             card.addView(TextView(context).apply { textSize=if(columns==3) 12f else 14f;setTextColor(TvStyle.text);maxLines=2;ellipsize=TextUtils.TruncateAt.END;setPadding(dp(3),dp(6),dp(3),0) },LinearLayout.LayoutParams(-1,dp(44)))
             card.addView(TextView(context).apply { textSize=11f;setTextColor(TvStyle.muted);maxLines=1;ellipsize=TextUtils.TruncateAt.END;setPadding(dp(3),dp(3),dp(3),0) },LinearLayout.LayoutParams(-1,dp(20)))
             addView(card,LinearLayout.LayoutParams(cardWidth,-2).apply { rightMargin=dp(10) })
@@ -154,11 +155,13 @@ internal class StreamingPosterGrid(
             val item=items.getOrNull(index)
             card.visibility=if(item==null) View.INVISIBLE else View.VISIBLE
             if(item==null) continue
-            val image=card.getChildAt(0) as ImageView
-            card.tag=item.id;card.background=TvStyle.card(context,false);card.contentDescription="${item.title}，${label(item)}"
+            val image=card.getChildAt(0) as RankedPoster
+            val position=rank(item)
+            image.setRank(position)
+            card.tag=item.id;card.background=TvStyle.card(context,false);card.contentDescription=listOf(item.title,position?.let { "第 $it 名" }.orEmpty(),label(item)).filter { it.isNotBlank() }.joinToString("，")
             card.layoutParams=card.layoutParams.apply { width=cardWidth }
             image.layoutParams=image.layoutParams.apply { height=((cardWidth-dp(8))/TvStyle.POSTER_ASPECT).toInt() }
-            (card.getChildAt(1) as TextView).text=item.title;(card.getChildAt(2) as TextView).text=label(item)
+            (card.getChildAt(1) as TextView).text=item.title;(card.getChildAt(2) as TextView).apply { text=label(item);setTextColor(if(position!=null) TvStyle.accent else TvStyle.muted) }
             card.setOnClickListener { open(item) };card.setOnLongClickListener { actions(item,card);true }
             card.setOnFocusChangeListener { _,focused ->
                 card.background=TvStyle.card(context,focused)
@@ -181,6 +184,33 @@ internal class StreamingPosterGrid(
         mounted[rowIndex]=row
         return row
     }
+    /** Rank belongs to the bound item, and must be cleared when a pooled card is reused. */
+    private class RankedPoster(context: Context): ImageView(context) {
+        private val density=resources.displayMetrics.density
+        private val backgroundPaint=android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+            color=android.graphics.Color.argb(220,20,20,24)
+        }
+        private val numberPaint=android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+            textSize=16*density;typeface=android.graphics.Typeface.DEFAULT_BOLD
+            textAlign=android.graphics.Paint.Align.CENTER
+        }
+        private var number=""
+        fun setRank(value: Int?) {
+            number=value?.takeIf { it>0 }?.let { "第 $it 名" }.orEmpty()
+            numberPaint.color=TvStyle.text
+            backgroundPaint.color=if(value!=null && value in 1..3) TvStyle.accent else android.graphics.Color.argb(235,20,20,24)
+            invalidate()
+        }
+        override fun onDraw(canvas: android.graphics.Canvas) {
+            super.onDraw(canvas)
+            if(number.isEmpty()) return
+            val left=2*density;val top=2*density;val height=27*density
+            val width=maxOf(height,numberPaint.measureText(number)+16*density)
+            canvas.drawRoundRect(left,top,left+width,top+height,8*density,8*density,backgroundPaint)
+            canvas.drawText(number,left+width/2,top+height/2-(numberPaint.ascent()+numberPaint.descent())/2,numberPaint)
+        }
+    }
+
     private fun focusIndex(index: Int) {
         val item=items.getOrNull(index) ?: return
         find(item.id)?.requestFocus();post { updateViewport() }

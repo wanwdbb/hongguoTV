@@ -1794,7 +1794,11 @@ class MainActivity: Activity() {
         parent.addView(Space(this),lp(1,dp(16)))
         val layout=row().apply { gravity=Gravity.TOP }
         parent.addView(layout,lp(-1,0).apply { weight=1f })
-        val sidebar=column();layout.addView(sidebar,lp(dp(170),-1).apply { rightMargin=dp(22) })
+        // Both panes need independent scrolling on short phone screens.
+        val sidebarScroll=ScrollView(this).apply { isVerticalScrollBarEnabled=true;isFillViewport=true }
+        val sidebar=column()
+        sidebarScroll.addView(sidebar,FrameLayout.LayoutParams(-1,-2))
+        layout.addView(sidebarScroll,lp(dp(170),-1).apply { rightMargin=dp(22) })
         val scroll=ScrollView(this).apply { isVerticalScrollBarEnabled=false }
         val content=column().apply { setPadding(dp(20),dp(14),dp(20),dp(14));background=rounded(surface) }
         scroll.addView(content,FrameLayout.LayoutParams(-1,-2));layout.addView(scroll,lp(0,-1).apply {weight=1f})

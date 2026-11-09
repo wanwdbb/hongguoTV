@@ -49,6 +49,7 @@ class MainActivity: Activity() {
     }
     private val bg=TvStyle.background; private val surface=TvStyle.surface
     private val accent=TvStyle.accent; private val white=TvStyle.text; private val muted=TvStyle.muted
+    private val notices by lazy { AppNotice(this) }
     private val main=Handler(Looper.getMainLooper())
     private val io=Executors.newFixedThreadPool(3)
     private val pageWork=PageWork(io,main,{ !isDestroyed },{ foreground })
@@ -609,7 +610,7 @@ class MainActivity: Activity() {
         recommendLoading=false
         if(catalog.isNotEmpty()) {
             if(batch>1) page=(batch-1).coerceAtLeast(1)
-            Toast.makeText(this,"暂时加载不出更多推荐，请稍后再试",Toast.LENGTH_LONG).show()
+            notices.show("暂时加载不出更多推荐，请稍后再试", long=true)
             showCatalog()
             return
         }
@@ -636,7 +637,7 @@ class MainActivity: Activity() {
             if(recommendMode!=modes[index]) {
                 recommendMode=modes[index]; rememberRecommend()
                 tabState.remove(TAB_RECOMMEND); tabFocus.remove(TAB_RECOMMEND)
-                Toast.makeText(this,"下次进入推荐按「${modes[index].label}」排列",Toast.LENGTH_SHORT).show()
+                notices.show("下次进入推荐按「${modes[index].label}」排列")
             }
             anchor.text="推荐模式  ·  ${recommendMode.label}"
         })
@@ -646,7 +647,7 @@ class MainActivity: Activity() {
             recommendResetAt=System.currentTimeMillis(); rememberRecommend()
             tabState.remove(TAB_RECOMMEND); tabFocus.remove(TAB_RECOMMEND)
             anchor.text="重置兴趣  ·  已重置"
-            Toast.makeText(this,"已重置推荐兴趣，下次进入推荐重新累计",Toast.LENGTH_LONG).show()
+            notices.show("已重置推荐兴趣，下次进入推荐重新累计", long=true)
         }
     }
     /** 切换榜单：整页重来，命中缓存时立即显示。 */
@@ -1125,7 +1126,7 @@ class MainActivity: Activity() {
                 if(requestTab!=tab) return@work
                 if(accountSessionExpired(problem)) {
                     clearAccountSession()
-                    Toast.makeText(this,"登录状态已失效，请重新登录",Toast.LENGTH_LONG).show()
+                    notices.show("登录状态已失效，请重新登录", long=true)
                     catalog=emptyList(); hasMore=false; showCatalog()
                 } else {
                     catalog=emptyList(); hasMore=false
@@ -1204,7 +1205,7 @@ class MainActivity: Activity() {
                 catalog=emptyList(); hasMore=false; ranking=null; rankSubtitle?.text="榜单加载失败"
                 if(problem is SearchSessionExpiredException) {
                     page=1; catalogFocus=""
-                    Toast.makeText(this,"搜索结果已过期，已回到第 1 页刷新",Toast.LENGTH_LONG).show()
+                    notices.show("搜索结果已过期，已回到第 1 页刷新", long=true)
                     showCatalog(true)
                 } else {
                     body.removeAllViews()
@@ -1418,10 +1419,10 @@ class MainActivity: Activity() {
         tvTools.choose(series.title,labels,anchor,{ choice ->
             when(choice) {
                 0 -> openDetail(series,true)
-                1 -> { val added=library.toggle(series); Toast.makeText(this,if(added) "已收藏" else "已取消收藏",Toast.LENGTH_SHORT).show(); refreshLibraryCards(series.id,!added && (tab==TAB_FAVORITES || collection=="updates")); if(added) favoriteMonitor.check() }
-                2 -> { val added=library.toggleLater(series); Toast.makeText(this,if(added) "已加入稍后看" else "已移出稍后看",Toast.LENGTH_SHORT).show(); refreshLibraryCards(series.id,!added && collection=="later") }
+                1 -> { val added=library.toggle(series); notices.show(if(added) "已收藏" else "已取消收藏"); refreshLibraryCards(series.id,!added && (tab==TAB_FAVORITES || collection=="updates")); if(added) favoriteMonitor.check() }
+                2 -> { val added=library.toggleLater(series); notices.show(if(added) "已加入稍后看" else "已移出稍后看"); refreshLibraryCards(series.id,!added && collection=="later") }
                 3 -> openDetail(series)
-                4 -> if(tab==TAB_HISTORY) manageHistory(series,anchor) else { library.hide(series.id); Toast.makeText(this,"已隐藏热门推荐，可在设置中恢复",Toast.LENGTH_SHORT).show(); refreshLibraryCards(series.id,true) }
+                4 -> if(tab==TAB_HISTORY) manageHistory(series,anchor) else { library.hide(series.id); notices.show("已隐藏热门推荐，可在设置中恢复"); refreshLibraryCards(series.id,true) }
             }
         })
     }
@@ -1532,7 +1533,7 @@ class MainActivity: Activity() {
     private fun toggleReservation(series: Series,reservation: AccountReservation?,anchor: TextView?=null) {
         if(reservationBusy) return
         if(repository.currentSession()==null) {
-            Toast.makeText(this,"登录红果账号后才能预约",Toast.LENGTH_SHORT).show()
+            notices.show("登录红果账号后才能预约")
             switchTab(TAB_ACCOUNT)
             return
         }
@@ -1554,7 +1555,7 @@ class MainActivity: Activity() {
                     } else {
                         reservedIds-=series.id; remoteReservations.remove(series.id)
                     }
-                    Toast.makeText(this,if(active) "已预约《${series.title}》" else "已取消预约",Toast.LENGTH_SHORT).show()
+                    notices.show(if(active) "已预约《${series.title}》" else "已取消预约")
                     when {
                         screen==Screen.PREVIEW && previewSeries?.id==series.id ->
                             openPreview(series,remoteReservations[series.id] ?: reservation)
@@ -1564,16 +1565,16 @@ class MainActivity: Activity() {
                 }.onFailure { problem ->
                     if(accountSessionExpired(problem)) {
                         clearAccountSession()
-                        Toast.makeText(this,"登录状态已失效，请重新登录",Toast.LENGTH_LONG).show()
+                        notices.show("登录状态已失效，请重新登录", long=true)
                         if(screen==Screen.CATALOG || screen==Screen.PREVIEW || screen==Screen.DETAIL) showCatalog()
-                    } else Toast.makeText(this,authMessage(problem),Toast.LENGTH_LONG).show()
+                    } else notices.show(authMessage(problem), long=true)
                 }
             }
         }
     }
     private fun chooseReservationToCancel(anchor: View?) {
         if(repository.currentSession()==null) {
-            Toast.makeText(this,"登录红果账号后才能管理预约",Toast.LENGTH_SHORT).show()
+            notices.show("登录红果账号后才能管理预约")
             switchTab(TAB_ACCOUNT); return
         }
         val rows=remoteReservations.values.filter { it.subscribed }
@@ -1600,15 +1601,15 @@ class MainActivity: Activity() {
                 anchor.text="刷新资料"
                 result.onSuccess { session ->
                     AuthStore.save(this,session)
-                    Toast.makeText(this,"账号资料已更新",Toast.LENGTH_SHORT).show()
+                    notices.show("账号资料已更新")
                     if(screen==Screen.CATALOG && tab==TAB_ACCOUNT) showCatalog()
                 }.onFailure { problem ->
                     val message=authMessage(problem)
                     if(accountSessionExpired(problem)) {
                         clearAccountSession()
-                        Toast.makeText(this,"登录状态已失效，请重新登录",Toast.LENGTH_LONG).show()
+                        notices.show("登录状态已失效，请重新登录", long=true)
                         if(screen==Screen.CATALOG) showCatalog()
-                    } else Toast.makeText(this,message,Toast.LENGTH_LONG).show()
+                    } else notices.show(message, long=true)
                 }
             }
         }
@@ -1739,7 +1740,7 @@ class MainActivity: Activity() {
                                 stopQrPoll()
                                 repository.cancelLoginQr()
                                 qrZoomDialog?.dismiss()
-                                Toast.makeText(this,"登录成功",Toast.LENGTH_SHORT).show()
+                                notices.show("登录成功")
                                 if(screen==Screen.CATALOG) {
                                     if(accountTab()) { catalog=emptyList(); hasMore=false; showCatalog(load=true) }
                                     else showCatalog()
@@ -1875,7 +1876,7 @@ class MainActivity: Activity() {
 
         lateinit var hidden: TextView
         hidden=setting(device,"恢复隐藏推荐  ·  ${library.hidden().size} 部") {
-            library.unhideAll(); hidden.text="恢复隐藏推荐  ·  0 部"; Toast.makeText(this,"热门推荐已恢复",Toast.LENGTH_SHORT).show()
+            library.unhideAll(); hidden.text="恢复隐藏推荐  ·  0 部"; notices.show("热门推荐已恢复")
         }
 
                 }
@@ -1889,7 +1890,7 @@ class MainActivity: Activity() {
                     favoriteMonitor.stop(); library.restore(data,restoreSettings)
                     tabState.clear(); tabFocus.clear(); catalogFocus=""; page=1
                     showCatalog(); favoriteMonitor.check()
-                    Toast.makeText(this,"记录已合并恢复",Toast.LENGTH_LONG).show()
+                    notices.show("记录已合并恢复", long=true)
                 }
             }.onFailure { tvTools.info("无法生成备份","本机记录暂时无法导出，请重试。",backup) }
         }
@@ -2026,7 +2027,7 @@ class MainActivity: Activity() {
             val saved=library.progress(data.series.id)
             val target=ResumePlayback.target(data.episodes,saved?.episodeId,saved?.position ?: 0,saved?.completed==true)
             playEpisode(target.index,target.position,autoplay,saveCurrent=false)
-        }, { Toast.makeText(this,"续播进度暂时无法确认，请联网后重试",Toast.LENGTH_LONG).show() })
+        }, { notices.show("续播进度暂时无法确认，请联网后重试", long=true) })
     }
     private fun openDetail(series: Series,resume: Boolean=false,autoplay: Boolean=true,fromCharacter: Boolean=false,remoteEpisodeId: String="",remotePosition: Long=0,remoteEpisodeIndex: Int=-1) {
         pendingDetail=series; detailAutoplay=autoplay
@@ -2099,7 +2100,7 @@ class MainActivity: Activity() {
         feedSeriesId=series.id
         if(screen==Screen.PLAYER && player!=null && detail?.series?.id==series.id && !playError) return
         saveProgress(); library.flush(); player?.pause()
-        if(screen!=Screen.PLAYER) Toast.makeText(this,"正在打开《${series.title}》…",Toast.LENGTH_SHORT).show()
+        if(screen!=Screen.PLAYER) notices.show("正在打开《${series.title}》…")
         if(screen==Screen.PLAYER && ::playbackText.isInitialized) { playbackText.text="正在切换到《${series.title}》…"; showHud() }
         val ready=preparedSeries.take(series.id)
         val known=ready?.detail ?: detail?.takeIf { it.series.id==series.id }
@@ -2110,7 +2111,7 @@ class MainActivity: Activity() {
             startFeedEpisode(series,result,ready)
         }, { problem ->
             ready?.close()
-            if(feedMode) Toast.makeText(this,"《${series.title}》暂时打不开，按 ↑/↓ 换一部",Toast.LENGTH_LONG).show()
+            if(feedMode) notices.show("《${series.title}》暂时打不开，按 ↑/↓ 换一部", long=true)
             if(screen==Screen.PLAYER && ::playbackText.isInitialized) showHud()
         })
     }
@@ -2127,11 +2128,11 @@ class MainActivity: Activity() {
     private fun switchFeed(delta: Int) {
         if(!feedMode) return
         val target=feedIndex+delta
-        if(target<0) { Toast.makeText(this,"已经是推荐的上一部",Toast.LENGTH_SHORT).show(); return }
+        if(target<0) { notices.show("已经是推荐的上一部"); return }
         if(target>=catalog.size) {
             pendingFeedIndex=target
             if(!hasMore) finishFeed()
-            else { if(feedBatchJob==null) Toast.makeText(this,"正在加载更多推荐…",Toast.LENGTH_SHORT).show(); appendFeedBatch() }
+            else { if(feedBatchJob==null) notices.show("正在加载更多推荐…"); appendFeedBatch() }
             return
         }
         feedIndex=target; catalogFocus=catalog[target].id
@@ -2636,13 +2637,13 @@ class MainActivity: Activity() {
                     detail=next
                     library.observeFavorite(next.series.id,next.episodes.size,System.currentTimeMillis(),acknowledge=true)
                     if(feedMode) {feedSeriesId=next.series.id;catalog.indexOfFirst {it.id==next.series.id}.takeIf {it>=0}?.let {feedIndex=it}}
-                    Toast.makeText(this,"正在续播《${next.series.title}》",Toast.LENGTH_LONG).show()
+                    notices.show("正在续播《${next.series.title}》", long=true)
                     playEpisode(0,0,autoplay=true,saveCurrent=false)
                 }
                 next
             } catch(problem: Exception) {
                 android.util.Log.w("HongguoTV","Season transition failed type=${problem.javaClass.simpleName}")
-                main.post {if(epoch==seasonEpoch && active()) {Toast.makeText(this,"下一季暂时加载失败",Toast.LENGTH_SHORT).show();finish()}}
+                main.post {if(epoch==seasonEpoch && active()) {notices.show("下一季暂时加载失败");finish()}}
                 null
             }
         }
@@ -2704,10 +2705,10 @@ class MainActivity: Activity() {
             seasonBanner?.visibility=View.GONE; return
         }
         if(seasonBanner==null) {
-            seasonBanner=text("本季结束后播放《${next.series.title}》",17f).apply {
-                maxLines=2;ellipsize=TextUtils.TruncateAt.END;maxWidth=(resources.displayMetrics.widthPixels-dp(48)).coerceAtLeast(dp(100));setPadding(dp(14),dp(9),dp(14),dp(9));background=rounded(TvStyle.surface)
-            }
-            root.addView(seasonBanner,FrameLayout.LayoutParams(-2,-2,Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL).apply { setMargins(dp(24),0,dp(24),dp(20)) })
+            seasonBanner=AppNotice.label(this,"本季结束后播放《${next.series.title}》",resources.displayMetrics.widthPixels)
+            root.addView(seasonBanner,FrameLayout.LayoutParams(-2,-2,Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL).apply {
+                setMargins(dp(16),0,dp(16),dp(AppNotice.BOTTOM_MARGIN_DP))
+            })
         }
         seasonBanner?.visibility=if(screen==Screen.PLAYER && foreground && !panel && episodePanel==null && !playError && !sleepStopped && !tvTools.showing) View.VISIBLE else View.GONE
     }
@@ -2812,7 +2813,7 @@ class MainActivity: Activity() {
         val currentQuality=qualityCap ?: library.maxQuality
         if(decoding && !autoFallbackTried && currentQuality>720) {
             autoFallbackTried=true; qualityCap=720; qualityCapKey="${detail?.series?.id.orEmpty()}:$episodeIndex"
-            Toast.makeText(this,"当前清晰度无法解码，已自动改用 720P 重试",Toast.LENGTH_SHORT).show()
+            notices.show("当前清晰度无法解码，已自动改用 720P 重试")
             playEpisode(episodeIndex,retryPosition,retryAutoplay)
             return
         }
@@ -2829,7 +2830,7 @@ class MainActivity: Activity() {
         addButton(actions,"立即重试") { playEpisode(episodeIndex,retryPosition,retryAutoplay) }.requestFocus()
         addButton(actions,"改用 720P") {
             qualityCap=720; qualityCapKey="${detail?.series?.id.orEmpty()}:$episodeIndex"; autoFallbackTried=true
-            Toast.makeText(this,"本次播放改用 720P，默认清晰度不变",Toast.LENGTH_SHORT).show()
+            notices.show("本次播放改用 720P，默认清晰度不变")
             playEpisode(episodeIndex,retryPosition,retryAutoplay)
         }
         if(feedMode) addButton(actions,"换下一部") { panel=false; switchFeed(1) }
@@ -2908,7 +2909,7 @@ class MainActivity: Activity() {
             val saved=library.toggle(data.series)
             if(saved) library.observeFavorite(data.series.id,data.episodes.size,System.currentTimeMillis(),acknowledge=true)
             favorite.text=if(saved) "已追剧" else "追剧"
-            Toast.makeText(this,if(saved) "已追剧，收藏里有更新会提醒" else "已取消追剧",Toast.LENGTH_SHORT).show()
+            notices.show(if(saved) "已追剧，收藏里有更新会提醒" else "已取消追剧")
         }
         danmakuButton=addButton(actions,if(danmakuEnabled) "弹幕开" else "弹幕关") { toggleDanmaku() }
         lateinit var speed: TextView
@@ -3001,7 +3002,7 @@ class MainActivity: Activity() {
         window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         playbackText.text="定时停止已生效 · 观看位置已保存 · 按播放可继续"
         showHud(); if(!playError && episodePanel==null) showPanel(); syncMediaSession()
-        Toast.makeText(this,"定时停止已生效",Toast.LENGTH_LONG).show()
+        notices.show("定时停止已生效", long=true)
     }
     private fun showSleepPicker(anchor: TextView) {
         val labels=listOf("关闭定时停止","15 分钟后","30 分钟后","60 分钟后","90 分钟后","本集播完","再播完 3 集","再播完 5 集")
@@ -3327,7 +3328,7 @@ class MainActivity: Activity() {
         if(danmakuEnabled) { danmakuLoadedUntil=0; danmakuFailedAt=0; main.removeCallbacks(danmakuTick); main.post(danmakuTick) }
         else { danmakuItems.clear(); danmakuView?.clear() }
         applyDanmakuVisibility(); updateDanmakuButton(); showHud()
-        Toast.makeText(this,if(danmakuEnabled) "弹幕已打开" else "弹幕已关闭",Toast.LENGTH_SHORT).show()
+        notices.show(if(danmakuEnabled) "弹幕已打开" else "弹幕已关闭")
     }
     private fun updateDanmakuButton() { danmakuButton?.text=if(danmakuEnabled) "弹幕开" else "弹幕关" }
     private fun returnToDetail(forceDetail: Boolean=false) {
@@ -3370,7 +3371,7 @@ class MainActivity: Activity() {
         }
         if(recent) { feedBackAt=0; saveProgress(); library.flush(); finish(); return }
         feedBackAt=now
-        Toast.makeText(this,"再按一次返回键退出应用",Toast.LENGTH_SHORT).show()
+        notices.show("再按一次返回键退出应用")
         revealFeedChrome()
     }
     @Deprecated("TV remote back is handled through the activity")
@@ -3429,7 +3430,7 @@ class MainActivity: Activity() {
         }
     }
     override fun onResume() {
-        super.onResume(); foreground=true; main.removeCallbacks(tick); main.post(tick)
+        super.onResume(); notices.resume(); foreground=true; main.removeCallbacks(tick); main.post(tick)
         updater.resume()
         if(library.isLoaded) {
             if(initialCatalogPending) showCatalog(load=true)
@@ -3450,6 +3451,7 @@ class MainActivity: Activity() {
         if(library.isLoaded) accountHistorySync.resume(library.history())
     }
     override fun onPause() {
+        notices.pause()
         updater.pause()
         foreground=false; main.removeCallbacks(tick); cancelRecovery(); cancelPrefetch(); mediaSession.deactivate()
         sleepTimer.cancel(); favoriteMonitor.stop(); detailAutoplay=false; requestedAutoplay=false; pausedForLifecycle=true

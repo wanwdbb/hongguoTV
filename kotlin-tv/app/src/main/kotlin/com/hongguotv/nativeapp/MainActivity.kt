@@ -2676,8 +2676,9 @@ class MainActivity: Activity() {
         seasonCandidate=null;seasonBanner?.let { root.removeView(it) };seasonBanner=null
     }
     private fun maybeSeasonLookup(data: Detail) {
-        if(!library.autoSeason || !library.prefetchNext || seasonKey==data.series.id ||
-            connectivity.isActiveNetworkMetered || !networkAvailable() || SeasonContinuation.query(data.series.title)==null) return
+        // Season metadata is needed for the notice even when video preloading is disabled.
+        if(!library.autoSeason || !library.autoNext || seasonKey==data.series.id ||
+            !networkAvailable() || SeasonContinuation.query(data.series.title)==null) return
         cancelSeasonLookup(); seasonKey=data.series.id
         val scope=RequestScope(); seasonScope=scope
         val source=data.series.id; val epoch=seasonEpoch
@@ -2701,15 +2702,20 @@ class MainActivity: Activity() {
         val p=player
         val remaining=if(p!=null && p.duration>0) (p.duration-p.currentPosition).coerceAtLeast(0) else Long.MAX_VALUE
         val secondsRemaining=if(p!=null) remaining / p.playbackParameters.speed.coerceAtLeast(.1f) else Float.MAX_VALUE
-        if(next==null || !library.autoSeason || !library.autoNext || p?.isPlaying!=true || secondsRemaining>5000 || remaining<=0) {
+        if(next==null || !library.autoSeason || !library.autoNext || p?.isPlaying!=true || secondsRemaining>10_000 || remaining<=0) {
             seasonBanner?.visibility=View.GONE; return
         }
         if(seasonBanner==null) {
             seasonBanner=AppNotice.label(this,"本季结束后播放《${next.series.title}》",resources.displayMetrics.widthPixels)
+        }
+        // A rebuilt player page may have detached the existing notice.
+        if(seasonBanner?.parent!==root) {
+            (seasonBanner?.parent as? ViewGroup)?.removeView(seasonBanner)
             root.addView(seasonBanner,FrameLayout.LayoutParams(-2,-2,Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL).apply {
                 setMargins(dp(16),0,dp(16),dp(AppNotice.BOTTOM_MARGIN_DP))
             })
         }
+        seasonBanner?.bringToFront()
         seasonBanner?.visibility=if(screen==Screen.PLAYER && foreground && !panel && episodePanel==null && !playError && !sleepStopped && !tvTools.showing) View.VISIBLE else View.GONE
     }
     private fun cancelFeedPrefetch() {
@@ -2764,11 +2770,12 @@ class MainActivity: Activity() {
     }
     private fun maybePrefetch() {
         val p=player ?: return; val data=detail ?: return
-        if(!foreground || !p.isPlaying || !library.autoNext || !library.prefetchNext || playError || sleepStopped) return
+        if(!foreground || !p.isPlaying || !library.autoNext || playError || sleepStopped) return
         // Match the reference: discover the adjacent season halfway through the last episode.
         if(episodeIndex==data.episodes.lastIndex && p.duration>0 && p.currentPosition>=p.duration/2) {
             maybeSeasonLookup(data); return
         }
+        if(!library.prefetchNext) return
         if(!PrefetchPolicy.nearEnd(p.currentPosition,p.duration,p.playbackParameters.speed)) return
         val stable=if(readySince==0L) 0 else android.os.SystemClock.elapsedRealtime()-readySince
         if(!PrefetchPolicy.buffered(p.currentPosition,p.duration,p.bufferedPosition,stable)) return

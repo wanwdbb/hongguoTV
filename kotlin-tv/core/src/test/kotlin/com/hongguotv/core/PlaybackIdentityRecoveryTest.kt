@@ -97,7 +97,7 @@ class PlaybackIdentityRecoveryTest {
     @Test fun backgroundDoesNotProbeAllCoolingRoutesOrRotateIdentity() {
         var registrations=0; var requests=0
         val session=PlaybackSession { _,_ -> registrations++; DeviceRegister.Registered("333","444") }
-        val http=OkHttpClient.Builder().addInterceptor { chain -> requests++
+        val http=OkHttpClient.Builder().addInterceptor { chain -> if(chain.request().url.encodedPath.contains("multi_video_model")) requests++
             Response.Builder().request(chain.request()).protocol(Protocol.HTTP_1_1).code(200).message("OK").body("".toResponseBody()).build()
         }.build()
         val repo=ContentRepository(http,playbackSession=session)

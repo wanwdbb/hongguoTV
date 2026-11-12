@@ -32,6 +32,29 @@ class Har4CompatibilityTest {
         assertEquals("1080P（兼容资源）",repo.stream("123",720).quality)
         assertEquals(1,calls)
     }
+    @Test fun plainOrBase64UrlWithSeedDoesNotUseSpadeDecryption() {
+        for(url in listOf("https://example.invalid/a.mp4",java.util.Base64.getEncoder().encodeToString("https://example.invalid/a.mp4".toByteArray()))) {
+            val row=JSONObject().put("main_url",url).put("height",720)
+            val reply=JSONObject(model(JSONArray().put(row)))
+            val entry=reply.getJSONObject("data").getJSONObject("123")
+            val model=JSONObject(entry.getString("video_model")).put("key_seed","c2VlZA==")
+            entry.put("video_model",model)
+            assertEquals("https://example.invalid/a.mp4",repository { reply.toString() }.stream("123").url)
+        }
+    }
+    @Test fun fullHdTopLevelDimensionsAndBackupUrlAreSelected() {
+        val full=JSONObject().put("vwidth",1920).put("vheight",1080).put("main_url","broken")
+            .put("backup_url_1","https://example.invalid/full.mp4").put("video_meta",JSONObject().put("codec_type","h264"))
+        val reply=model(JSONArray().put(variant(720)).put(full))
+        assertEquals("1080P",repository { reply }.stream("123",1080).quality)
+        assertEquals("https://example.invalid/full.mp4",repository { reply }.stream("123",1080).url)
+        assertEquals("720P",repository { reply }.stream("123",720).quality)
+    }
+    @Test fun invalidFullHdVariantDoesNotDiscardValidFullHd() {
+        val bad=variant(1080).put("encrypt_info",JSONObject().put("encrypt",true).put("spade_a","invalid"))
+        val reply=model(JSONArray().put(bad).put(variant(1080)).put(variant(720)))
+        assertEquals("1080P",repository { reply }.stream("123").quality)
+    }
     @Test fun nestedMetadataHonoursQualityCap() {
         val repo=repository { model(JSONArray().put(variant(1080)).put(variant(480)).put(variant(720))) }
         assertEquals("https://example.invalid/720.mp4",repo.stream("123",720).url)
@@ -47,7 +70,8 @@ class Har4CompatibilityTest {
         val paths=mutableListOf<String>()
         val repo=repository { request -> paths+=request.url.encodedPath; "" }
         assertThrows(IOException::class.java) { repo.stream("123") }
-        assertEquals(5,paths.size)
+        assertEquals(5,paths.count { it.contains("multi_video_model") })
+        assertTrue(paths.size>5) // Foreground compatibility registration has its own bounded budget.
         assertEquals("/reading/bookapi/video_tab/multi_video_model/v1/",paths.first())
     }
     @Test fun encryptedVariantWithoutKeyFailsBeforePlayback() {

@@ -1287,8 +1287,19 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
     }
     fun stream(id: String, maxQuality: Int = 1080, speculative: Boolean = false): StreamInfo {
         require(id.matches(Regex("[0-9]{1,30}")))
-        return parseStream(playbackModels.fetch(id,speculative),id,maxQuality)
+        return try { parseStream(playbackModels.fetch(id,speculative),id,maxQuality) }
+        catch(error: PlaybackModelException) {
+            RequestScope.ensureActive()
+            if(speculative || !error.compatibilityEligible) throw error
+            try { parseStream(compatibility.fetch(id) { candidate ->
+                val resolved=parseStream(candidate,id,maxQuality)
+                val q=qualityNumber(resolved.quality)
+                if(q==maxQuality) Int.MAX_VALUE else if(q<maxQuality) q else 0
+            },id,maxQuality) }
+            catch(retry: IOException) { RequestScope.ensureActive(); error.addSuppressed(retry); throw error }
+        }
     }
+    private val compatibility by lazy { CompatibilityPlayback(http) }
     private fun parseStream(data: JSONObject,id: String,maxQuality: Int): StreamInfo {
         // A batch may contain neighbours: never silently play another episode.
         val entry=data.optJSONObject("data")?.optJSONObject(id) ?: throw IOException("播放信息缺少当前分集")
@@ -1310,35 +1321,47 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
         val info=resolved.optJSONObject("video_info")?.optJSONObject("data") ?: throw IOException("没有播放资源")
         return streamVariants(info,maxQuality) ?: throw IOException("没有电视可播放的清晰度，请选择其他剧集")
     }
+    // Variant parsing follows N3urda/hongguoTV; retain only validated, playable rows.
     private fun streamVariants(info: JSONObject,maxQuality: Int): StreamInfo? {
         val list=info.opt("video_list")
         val variants=when(list) {
-            is JSONArray -> list.objects()
-            is JSONObject -> list.keys().asSequence().mapNotNull { list.optJSONObject(it) }.toList()
+            is JSONArray -> list.objects().map { "" to it }
+            is JSONObject -> list.keys().asSequence().mapNotNull { name -> list.optJSONObject(name)?.let { name to it } }.toList()
             else -> emptyList()
         }
-        val rows=variants.mapNotNull { item ->
-            val meta=item.optJSONObject("video_meta") ?: item
-            val codec=meta.str("codec_type").lowercase()
-            val format=meta.str("vtype").lowercase()
-            if(codec in setOf("bytevc2","bvc2") || (format.isNotEmpty() && format!="mp4") || item.str("main_url").isBlank()) return@mapNotNull null
-            val height=qualityNumber(meta.str("definition").ifEmpty { meta.str("quality_desc").ifEmpty { meta.str("vheight").ifEmpty { meta.str("height").ifEmpty { meta.str("quality") } } } })
-            height to item
-        }.sortedByDescending { it.first }
-        val selected=rows.firstOrNull { it.first<=maxQuality } ?: rows.lastOrNull() ?: return null
-        val item=selected.second
-        var url=cleanUrl(item.str("main_url"))
-        val seed=info.str("key_seed")
-        if(seed.isNotEmpty()) url=MediaCrypto.decryptUrl(url,decode64(seed))
-        if(!url.startsWith("https://") && !url.startsWith("http://")) throw IOException("播放地址无效")
-        val encryption=item.optJSONObject("encrypt_info")
-        val spade=encryption?.str("spade_a").orEmpty().ifEmpty { item.str("spade_a") }
-        if(encryption?.optBoolean("encrypt",false)==true && spade.isBlank()) throw IOException("播放加密信息不完整")
-        val method=encryption?.str("encryption_method").orEmpty()
-        if(method.isNotEmpty() && method!="cenc-aes-ctr") throw IOException("视频加密格式暂不支持")
-        val key=spade.takeIf { it.isNotEmpty() }?.let(MediaCrypto::deriveKey)
-        val quality=if(selected.first>0) "${selected.first}P"+(if(selected.first>maxQuality) "（兼容资源）" else "") else "自动"
-        return StreamInfo(url,key,quality)
+        val rows=variants.mapNotNull { (name,item) -> runCatching {
+            val meta=item.optJSONObject("video_meta")
+            val codec=listOf(item.str("codec_type"),item.str("gear_des_key"),meta?.str("codec_type").orEmpty()).joinToString(" ").lowercase()
+            val format=item.str("vtype").ifEmpty { meta?.str("vtype").orEmpty() }.lowercase()
+            if(codec.contains("bytevc2") || Regex("(^|[^a-z0-9])bvc2([^a-z0-9]|$)").containsMatchIn(codec) || format.isNotEmpty() && format!="mp4") return@runCatching null
+            val encryption=item.optJSONObject("encrypt_info")
+            val spade=encryption?.str("spade_a").orEmpty().ifEmpty { item.str("spade_a") }
+            if(encryption!=null && spade.isBlank() && encryption.opt("encrypt") !in listOf(false,0,"0","false")) return@runCatching null
+            val method=encryption?.str("encryption_method").orEmpty()
+            if(method.isNotEmpty() && method!="cenc-aes-ctr") return@runCatching null
+            val key=spade.takeIf { it.isNotEmpty() }?.let(MediaCrypto::deriveKey)
+            val url=listOf("main_url","play_url","backup_url_1").firstNotNullOfOrNull { field -> runCatching {
+                val raw=cleanUrl(item.str(field))
+                if(raw.isBlank()) return@runCatching null
+                val decoded=if(raw.startsWith("https://") || raw.startsWith("http://")) raw else {
+                    val plain=runCatching { String(decode64(raw),Charsets.UTF_8) }.getOrDefault("")
+                    if(plain.startsWith("https://") || plain.startsWith("http://")) plain
+                    else MediaCrypto.decryptUrl(raw,decode64(info.str("key_seed")))
+                }
+                val parsed=java.net.URI(decoded)
+                decoded.takeIf { parsed.scheme in setOf("http","https") && !parsed.host.isNullOrBlank() && parsed.userInfo==null }
+            }.getOrNull() } ?: return@runCatching null
+            val width=item.optInt("vwidth",meta?.optInt("vwidth",0) ?: 0)
+            val height=item.optInt("vheight",meta?.optInt("vheight",0) ?: 0)
+            val dimensions=if(width>0 && height>0) minOf(width,height).toString() else ""
+            val quality=listOf(item.str("quality_desc"),meta?.str("definition").orEmpty(),item.str("definition"),dimensions,
+                item.str("height"),item.str("vheight"),meta?.str("height").orEmpty(),item.str("quality"),name)
+                .firstNotNullOfOrNull { qualityNumber(it).takeIf { q -> q>0 } } ?: 0
+            quality to StreamInfo(url,key,"")
+        }.getOrNull() }.sortedByDescending { it.first }
+        val known=rows.filter { it.first>0 }
+        val selected=known.firstOrNull { it.first<=maxQuality } ?: known.lastOrNull() ?: rows.firstOrNull() ?: return null
+        return selected.second.copy(quality=if(selected.first>0) "${selected.first}P"+(if(selected.first>maxQuality) "（兼容资源）" else "") else "自动")
     }
     /**
      * 弹幕：官方弹幕接口按时间段返回，`startMs` 用 30 秒对齐，`durationMs` 是本集总时长。

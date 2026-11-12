@@ -12,7 +12,7 @@ import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
 
-class PlaybackModelException(val diagnostic: String, message: String) : IOException(message)
+class PlaybackModelException(val diagnostic: String, message: String, val compatibilityEligible: Boolean = false) : IOException(message)
 class PlaybackRegistrationException : IOException("播放设备注册失败，请稍后重试")
 
 /** 路径状态绑定匿名身份，前台与预加载共享，身份替换时自然失效。 */
@@ -180,7 +180,7 @@ internal class PlaybackModels(private val http: OkHttpClient, private val sessio
                 is java.net.SocketException -> "播放连接失败，请稍后重试"
                 else -> last?.message ?: "播放接口暂不可用"
             }
-            throw PlaybackModelException(trace.joinToString(" "),message)
+            throw PlaybackModelException(trace.joinToString(" "),message, trace.any { it.contains("/0B") || it.contains("=401/") || it.contains("=403/") })
         }
     }
 }

@@ -26,4 +26,35 @@ class SeasonContinuationTest {
   assertEquals(next,SeasonContinuation.select(from,listOf(from,later,next,next)))
   assertNull(SeasonContinuation.select(from,listOf(later,next.copy(preview=true))))
  }
+ @Test fun firstSeasonWithoutNumberAndOptionalPrefixContinue(){
+  val first=Series("1","修仙传奇")
+  val next=Series("2","修仙传奇2季")
+  assertEquals(next,SeasonContinuation.select(first,listOf(next)))
+ }
+ @Test fun relatedSeasonIndexSurvivesDetailWithoutSeasonMetadata(){
+  val current=Series("2","修仙传奇",seasonIndex=2)
+  val next=Series("3","修仙传奇",seasonIndex=3)
+  assertEquals(next,SeasonContinuation.select(current,listOf(next)))
+  val verified=SeasonContinuation.verifiedDetail(current,next,Detail(next.copy(seasonIndex=0),listOf("123")))
+  assertEquals(3,verified?.series?.seasonIndex)
+  assertNull(SeasonContinuation.verifiedDetail(current,next,Detail(next.copy(title="修仙传奇第4季"),listOf("123"))))
+ }
+ @Test fun rejectsConflictingMetadataUpcomingAndMissingSeason(){
+  val current=Series("1","修仙传奇")
+  assertNull(SeasonContinuation.select(current,listOf(Series("2","修仙传奇第2季",seasonIndex=3))))
+  assertNull(SeasonContinuation.select(current,listOf(Series("2","修仙传奇",seasonIndex=2,preview=true))))
+  assertNull(SeasonContinuation.select(current,listOf(Series("2","修仙传奇第3季"))))
+ }
+ @Test fun actualSeasons39Through42MixNumberPrefixes(){
+  val rows=listOf(
+   Series("7690809573896113177","谁说没灵根不能修仙的？之无灵证道第39季",seasonIndex=39),
+   Series("7694116863835376664","谁说没灵根不能修仙的？之无灵证道40季",seasonIndex=40),
+   Series("7694653395486919705","谁说没灵根不能修仙的？之无灵证道41季",seasonIndex=41),
+   Series("42","谁说没灵根不能修仙的？之无灵证道第42季",seasonIndex=42))
+  for(i in 0..2) {
+   assertEquals(rows[i+1],SeasonContinuation.select(rows[i],rows))
+   assertNotNull(SeasonContinuation.query(rows[i].title))
+   assertNotNull(SeasonContinuation.verifiedDetail(rows[i],rows[i+1],Detail(rows[i+1].copy(seasonIndex=0),listOf("123"))))
+  }
+ }
 }

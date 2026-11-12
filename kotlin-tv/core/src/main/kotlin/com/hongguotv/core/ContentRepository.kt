@@ -40,9 +40,9 @@ private const val FIRST_PAGE_BATCHES = 2
 internal fun cleanUrl(s: String) = s.replace("\\/","/").replace("\\u002F","/",ignoreCase=true).replace("\\u0026","&").replace("&amp;","&")
 /** 网站流式 HTML 偶尔会在文本里留下 NUL 等控制字符，单行展示前先清理。 */
 internal fun cleanText(s: String) = s.filter { it.code>=32 }.replace(Regex("[\\s\\u00a0\\u3000]+")," ").trim()
-data class Series(val id: String, val title: String, val cover: String = "", val description: String = "", val badge: String = "", val tags: String = "", val preview: Boolean = false, val bookType: Int = 0) {
-    fun toJson() = JSONObject().put("id",id).put("title",title).put("cover",cover).put("description",description).put("badge",badge).put("tags",tags).put("preview",preview).put("bookType",bookType)
-    companion object { fun fromJson(o: JSONObject) = Series(o.str("id"),o.str("title"),o.str("cover"),o.str("description"),o.str("badge"),o.str("tags"),o.optBoolean("preview",false),o.optInt("bookType",0)) }
+data class Series(val id: String, val title: String, val cover: String = "", val description: String = "", val badge: String = "", val tags: String = "", val preview: Boolean = false, val bookType: Int = 0, val seasonIndex: Int = 0) {
+    fun toJson() = JSONObject().put("id",id).put("title",title).put("cover",cover).put("description",description).put("badge",badge).put("tags",tags).put("preview",preview).put("bookType",bookType).put("seasonIndex",seasonIndex)
+    companion object { fun fromJson(o: JSONObject) = Series(o.str("id"),o.str("title"),o.str("cover"),o.str("description"),o.str("badge"),o.str("tags"),o.optBoolean("preview",false),o.optInt("bookType",0),o.optInt("seasonIndex",0)) }
 }
 data class Person(val id: String, val name: String, val avatar: String = "", val role: String = "", val fans: Long = 0, val creator: Boolean = false)
 /** 作者/主创页：同一演员或出品方的简介与作品列表。 */
@@ -362,7 +362,7 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
         // 预告片没有可播放分集，网站详情会返回 404/500；保留卡片，但在界面上标记为预告。
         val vid=item.str("vid").ifEmpty { nested?.str("vid").orEmpty() }
         val count=item.optInt("episode_cnt",nested?.optInt("episode_cnt",0) ?: 0)
-        val preview=vid.isEmpty() && count<=0
+        val preview=item.optInt("content_type")==1007 || item.optBoolean("disable_play",false) || (vid.isEmpty() && count<=0)
         val badge=cleanText(item.optJSONObject("tag_info")?.str("text").orEmpty())
         val subs=item.optJSONArray("sub_title_list")
         val tags=(0 until (subs?.length() ?: 0)).mapNotNull { index ->
@@ -370,7 +370,7 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
             if(row.optInt("data_type",0)==16) null else cleanText(row.str("content")).takeIf { it.isNotBlank() }
         }.take(3).joinToString(" · ")
         return Series(id,title,cleanUrl(item.str("cover").ifEmpty { item.str("series_cover") }),
-            cleanText(item.str("series_intro")),badge,tags,preview)
+            cleanText(item.str("series_intro")),badge,tags,preview,seasonIndex=item.optInt("season_index",0).coerceAtLeast(0))
     }
     /**
      * 详情页「相关作品」：官方详情页的 more_related 片单，返回同一系列的其他季/关联剧。
@@ -1287,18 +1287,25 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
     }
     fun stream(id: String, maxQuality: Int = 1080, speculative: Boolean = false): StreamInfo {
         require(id.matches(Regex("[0-9]{1,30}")))
+        fun compatible(): StreamInfo = parseStream(compatibility.fetch(id) { candidate ->
+            val q=qualityNumber(parseStream(candidate,id,maxQuality).quality)
+            if(q==maxQuality) Int.MAX_VALUE else if(q<maxQuality) q else 0
+        },id,maxQuality)
+        // A working compatibility path should not wait through the same failed primary round.
+        if(clock()<compatibilityPreferredUntil) {
+            if(speculative) return compatible()
+            try { return compatible() } catch(error: IOException) { RequestScope.ensureActive() }
+        }
         return try { parseStream(playbackModels.fetch(id,speculative),id,maxQuality) }
         catch(error: PlaybackModelException) {
             RequestScope.ensureActive()
             if(speculative || !error.compatibilityEligible) throw error
-            try { parseStream(compatibility.fetch(id) { candidate ->
-                val resolved=parseStream(candidate,id,maxQuality)
-                val q=qualityNumber(resolved.quality)
-                if(q==maxQuality) Int.MAX_VALUE else if(q<maxQuality) q else 0
-            },id,maxQuality) }
+            try { compatible().also { compatibilityPreferredUntil=clock()+5*60_000 } }
             catch(retry: IOException) { RequestScope.ensureActive(); error.addSuppressed(retry); throw error }
         }
     }
+    fun preferCompatibilityPlayback() { compatibilityPreferredUntil=clock()+5*60_000; compatibility.preferFullHd() }
+    @Volatile private var compatibilityPreferredUntil=0L
     private val compatibility by lazy { CompatibilityPlayback(http) }
     private fun parseStream(data: JSONObject,id: String,maxQuality: Int): StreamInfo {
         // A batch may contain neighbours: never silently play another episode.

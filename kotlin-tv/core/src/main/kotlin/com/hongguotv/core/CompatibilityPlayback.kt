@@ -12,6 +12,8 @@ import org.json.JSONObject
 
 internal class CompatibilityPlayback(private val http: OkHttpClient, private val device: (() -> PlayerDevice)? = null) {
     private val devices=PlayerDeviceSource(http)
+    @Volatile private var preferredTemplate: String?=null
+    fun preferFullHd() { preferredTemplate=PlayerDeviceSource.PHOENIX_URL }
     fun fetch(id: String, quality: (JSONObject) -> Int = { Int.MAX_VALUE }): JSONObject = RequestScope.withDeadline(System.nanoTime()+TimeUnit.SECONDS.toNanos(12)) {
         val device=try { device?.invoke() ?: devices.obtain() } catch(error: org.json.JSONException) { throw IOException("备用设备注册响应异常",error) }
         var failure: IOException?=null
@@ -20,7 +22,7 @@ internal class CompatibilityPlayback(private val http: OkHttpClient, private val
         for((template,body,ua) in listOf(
             Triple(PlayerDeviceSource.SHORTPLAY_URL,PlayerDeviceSource.shortplayBody(id),"com.dragon.read"),
             Triple(PlayerDeviceSource.PHOENIX_URL,PlayerDeviceSource.phoenixBody(id),VendorConstants.VIDEO_UA)
-        )) {
+        ).sortedBy { if(it.first==preferredTemplate) 0 else 1 }) {
             RequestScope.ensureActive()
             val url=PlayerDeviceSource.substituteDevice(template,device)
             val request=Request.Builder().url(url).header("User-Agent",ua).header("Accept-Language","zh-CN,zh;q=0.9")
@@ -47,7 +49,7 @@ internal class CompatibilityPlayback(private val http: OkHttpClient, private val
                 val candidate=JSONObject().put("data",JSONObject().put(id,entry))
                 val score=quality(candidate)
                 if(score>bestQuality) { best=candidate; bestQuality=score }
-                if(score==Int.MAX_VALUE) return@withDeadline candidate
+                if(score==Int.MAX_VALUE) { preferredTemplate=template; return@withDeadline candidate }
             } catch(error: IOException) { RequestScope.ensureActive(); failure=error }
         }
         best ?: throw (failure ?: IOException("备用播放接口暂不可用"))

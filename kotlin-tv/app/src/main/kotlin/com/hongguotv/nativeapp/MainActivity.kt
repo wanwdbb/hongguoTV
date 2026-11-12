@@ -53,7 +53,7 @@ class MainActivity: Activity() {
     private val main=Handler(Looper.getMainLooper())
     private val io=Executors.newFixedThreadPool(3)
     private val pageWork=PageWork(io,main,{ !isDestroyed },{ foreground })
-    private val repository=ContentRepository()
+    private val repository=ContentRepository().apply { preferCompatibilityPlayback() }
     private val accountHistorySync by lazy { AccountHistorySync(this,repository,::mergeCloudHistory) }
     private val networkCleanup=Executors.newSingleThreadExecutor()
     private val prefetchWorker=Executors.newSingleThreadExecutor()
@@ -2652,13 +2652,17 @@ class MainActivity: Activity() {
     private fun resolveNextSeason(ended: Detail): Detail? = RequestScope.withDeadline(System.nanoTime()+12_000_000_000L) {
         val query=SeasonContinuation.query(ended.series.title) ?: return@withDeadline null
         val candidates=ended.related.toMutableList()
-        if(!ended.extrasLoaded || ended.extrasFailed || candidates.isEmpty()) {
-            try { candidates.addAll(repository.related(ended.series.id)) }
+        if(!ended.extrasLoaded || ended.extrasFailed || SeasonContinuation.select(ended.series,candidates)==null) {
+            try {
+                val fresh=repository.related(ended.series.id)
+                val ids=fresh.map { it.id }.toSet()
+                candidates.removeAll { it.id in ids }; candidates.addAll(fresh)
+            }
             catch(_: Exception) { RequestScope.ensureActive() }
         }
         SeasonContinuation.select(ended.series,candidates)?.let { candidate ->
             val next=repository.detail(candidate.id)
-            if(next.episodes.isNotEmpty() && SeasonContinuation.select(ended.series,listOf(next.series))!=null) return@withDeadline next
+            SeasonContinuation.verifiedDetail(ended.series,candidate,next)?.let { return@withDeadline it }
         }
         val type=if(ended.series.bookType in 3..5) ContentType.COMIC else ContentType.SHORT
         for(page in 1..3) {
@@ -2667,7 +2671,7 @@ class MainActivity: Activity() {
             if(!result.hasMore) break
         }
         SeasonContinuation.select(ended.series,candidates)?.let { candidate ->
-            repository.detail(candidate.id).takeIf { it.episodes.isNotEmpty() && SeasonContinuation.select(ended.series,listOf(it.series))!=null }
+            SeasonContinuation.verifiedDetail(ended.series,candidate,repository.detail(candidate.id))
         }
     }
     private fun cancelSeasonLookup() {
@@ -2813,6 +2817,7 @@ class MainActivity: Activity() {
         retryPending=true; main.postDelayed(retryRunnable,delay)
     }
     private fun playerFailure(problem: Throwable) {
+        android.util.Log.w("HongguoTV", "Playback exception types="+generateSequence(problem as Throwable?) { it.cause }.take(8).joinToString(" -> ") { it.javaClass.name }+" frames="+problem.stackTrace.take(5).joinToString(" | "))
         retryPosition=currentPosition().coerceAtLeast(0); retryAutoplay=requestedAutoplay && !sleepStopped
         saveProgress(); cancelRecovery(); cancelPrefetch()
         val decoding=problem is PlaybackException && problem.errorCode in 3000..4999
@@ -3089,11 +3094,13 @@ class MainActivity: Activity() {
         if(playError) return
         if(feedMode) { revealFeedChrome(); return }
         panel=true; showHud(); controls.visibility=View.VISIBLE; controls.removeAllViews()
-        val transport=row(); controls.addView(transport)
+        val transport=row()
+        val actionScroll=HorizontalScrollView(this).apply { isHorizontalScrollBarEnabled=false; isFillViewport=true; clipToPadding=false; addView(transport) }
+        controls.addView(actionScroll,lp(-1,-2))
         val play=addButton(transport,if(player?.playWhenReady==true) "暂停" else "播放") { togglePlayback() }.also { transportPlay=it }
         addButton(transport,"上一集") { if(episodeIndex>0) playEpisode(episodeIndex-1) }.apply { isEnabled=episodeIndex>0; isFocusable=episodeIndex>0; alpha=if(episodeIndex>0) 1f else .4f }
         addButton(transport,"下一集") { if(episodeIndex<(detail?.episodes?.lastIndex ?: 0)) playEpisode(episodeIndex+1) }.apply { val enabled=episodeIndex<(detail?.episodes?.lastIndex ?: 0); isEnabled=enabled; isFocusable=enabled; alpha=if(enabled) 1f else .4f }
-        val options=row().apply { setPadding(0,dp(8),0,0) }; controls.addView(options)
+        val options=transport
         lateinit var episodes: TextView
         episodes=addButton(options,"选集") { showEpisodePanel(episodes) }
         danmakuButton=addButton(options,if(danmakuEnabled) "弹幕开" else "弹幕关") { toggleDanmaku() }
